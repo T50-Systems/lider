@@ -1,0 +1,5 @@
+{
+  "name": "t50-flow",
+  "version": "0.1.0",
+  "description": "Núcleo del flujo T50: wrapper de Codex endurecido, agente pair-reviewer y skill /pair-review."
+}

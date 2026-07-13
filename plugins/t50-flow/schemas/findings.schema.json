@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "engine": { "type": "string" },
+    "verdict": { "type": "string", "enum": ["approve", "approve_with_nits", "request_changes"] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NIT"] },
+          "summary": { "type": "string" },
+          "location": { "type": ["string", "null"] },
+          "suggestion": { "type": ["string", "null"] }
+        },
+        "required": ["severity", "summary", "location", "suggestion"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["engine", "verdict", "findings"],
+  "additionalProperties": false
+}
