@@ -8,7 +8,7 @@
       "name": "t50-flow",
       "source": "./plugins/t50-flow",
       "description": "Flujo T50: pair-review con Codex endurecido (sin zombies), pipeline y promoción por PRs.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }
