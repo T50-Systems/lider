@@ -3,6 +3,9 @@
   "owner": {
     "name": "T50-Systems"
   },
+  "metadata": {
+    "description": "Marketplace de T50-Systems: plugins de flujo de trabajo para Claude Code."
+  },
   "plugins": [
     {
       "name": "lider",
