@@ -1,13 +1,13 @@
 {
-  "name": "t50-flow",
+  "name": "t50",
   "owner": {
     "name": "T50-Systems"
   },
   "plugins": [
     {
-      "name": "t50-flow",
-      "source": "./plugins/t50-flow",
-      "description": "Flujo T50: pair-review con Codex endurecido (sin zombies), pipeline y promoción por PRs.",
+      "name": "lider",
+      "source": "./plugins/lider",
+      "description": "Líder: orquesta tu flujo (spec cerrada → implementador → pair-review con segundo motor → adjudicación → promoción por PRs). Agnóstico de motor.",
       "version": "0.2.0"
     }
   ]
