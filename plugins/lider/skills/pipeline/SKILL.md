@@ -31,8 +31,12 @@ Do not escalate by size — escalate by decision density. The implementer does n
 
 **Invoking Codex.** Delegate to the `codex:codex-rescue` agent, which forwards `task --model <slug> [--effort <none|minimal|low|medium|high|xhigh>] --write` to the Codex runtime. **Always pass an explicit `--model <slug>`** — the Codex default is `gpt-5.5` (disallowed), so an unset model does NOT give you Terra. Terra/Sol/Luna use their full slug above. Never select a Fast/priority tier.
 
+**Codex sandbox constraints (verified behaviors — plan around them):**
+- **Filesystem access is confined to the task's working directory.** Reads outside it fail (observed: a spec in a temp/scratchpad dir was unreadable and the task completed with zero work). Assume writes are equally confined. EVERYTHING the task needs — spec, fixtures, reference docs — must live inside the repo (use `<repo>/.local/`, gitignored, for non-committable inputs).
+- **The task can start in the wrong checkout** when multiple checkouts/worktrees of the repo exist (observed: a review task began in a sibling worktree and had to self-correct). Always state the exact working directory in the prompt AND require the task to verify `git branch --show-current` matches the intended branch before touching anything.
+
 **Codex operational rules (learned 2026-07, HRH daily-schedule-email run):**
-1. **The spec file MUST live inside the repo working directory** (e.g. `<repo>/.local/spec-<feature>.md`, gitignored). The Codex sandbox cannot read paths outside the working dir — a spec in a scratchpad/temp dir fails quietly: the task completes having done zero work.
+1. **The spec file MUST live inside the repo working directory** (e.g. `<repo>/.local/spec-<feature>.md`, gitignored) — see sandbox constraints above; an out-of-repo spec fails quietly: the task completes having done zero work.
 2. **Arm your own working-tree watcher when you launch a `--write` task** (poll `git status --short` for changes/stability). Do not rely on the wrapper agent's reporting — it tends to yield with "watcher set, waiting" instead of blocking, and a dead task can sit invisible for an hour.
 3. **Fast-fail: if no file has been touched within ~10 minutes of launching a `--write` task, interrogate it immediately** (message the wrapper: "inspect the task state NOW, no watchers"). A healthy implementer starts writing quickly; prolonged silence means the task died at launch.
 
