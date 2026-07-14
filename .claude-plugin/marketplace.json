@@ -4,13 +4,13 @@
     "name": "T50-Systems"
   },
   "metadata": {
-    "description": "Marketplace de T50-Systems: plugins de flujo de trabajo para Claude Code."
+    "description": "T50-Systems marketplace: workflow plugins for Claude Code."
   },
   "plugins": [
     {
       "name": "lider",
       "source": "./plugins/lider",
-      "description": "Líder: orquesta tu flujo (spec cerrada → implementador → pair-review con segundo motor → adjudicación → promoción por PRs). Agnóstico de motor.",
+      "description": "Lider: engine-agnostic workflow orchestrator (closed spec -> implementer -> pair-review with a second engine -> adjudication -> PR promotion).",
       "version": "0.2.0"
     }
   ]
