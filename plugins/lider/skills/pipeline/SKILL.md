@@ -43,7 +43,7 @@ Do not escalate by size — escalate by decision density. The implementer does n
 
 The GPT-5.3-Codex reviewer is realized by the Codex code-review path (model `codex-auto-review`), invoked through this plugin's `pair-review` skill — there is no bare `gpt-5.3-codex` slug in the install. When the reviewer is Opus, review the diff yourself and do NOT route it back through the Codex-backed `pair-review` (that would collapse to the same engine family the implementer used). GPT-5.3-Codex is the code/review specialist (diffs, cross-file coherence, regressions, coverage gaps, convention compliance), not a general implementer.
 
-**Steps 5–8 (verify, commit, promote, close-out): direct tools first.** Run tests / lint / typecheck / build / migrations / coverage with tools, never with a model. Use **Luna** (`--model gpt-5.6-luna`) for mechanical follow-up (interpret simple results, commit message, changelog, decision log, docs) and **Sonnet** to coordinate longer mechanical work or offload OpenAI quota. Never spend frontier tokens here.
+**Steps 5–8 (verify, commit, promote, close-out): direct tools first.** Run tests / lint / typecheck / build / migrations / coverage with tools, never with a model. Use **Luna** (`--model gpt-5.6-luna`) for mechanical follow-up (interpret simple results, commit message, changelog, decision log, docs); **Haiku** as the Claude-side equivalent when preserving OpenAI quota or Codex is unavailable (commit messages, changelog, simple result interpretation, close-out summary, cheap read-only repo searches via `Explore` subagents); **Sonnet** only when the mechanical work needs multi-step coordination or light judgment. Never spend frontier tokens here.
 
 ## Flow
 
