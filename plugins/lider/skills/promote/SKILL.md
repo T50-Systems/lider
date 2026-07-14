@@ -1,28 +1,28 @@
 ---
 name: promote
-description: Promociona el trabajo actual por el flujo de PRs: rama → PR a dev → merge → PR dev→main → merge → sync local. Úsalo cuando el trabajo esté verificado y listo para producción.
-argument-hint: "[--yes] [titulo del cambio]"
+description: "Promote the current work through the PR flow - branch, PR to dev, merge, PR dev to main, merge, local sync. Use when the work is verified and ready for production."
+argument-hint: "[--yes] [change title]"
 ---
 
-0. **Precondiciones.** Verifica antes de nada; si falla alguna, informa al usuario y detente:
-   - `git remote get-url origin` existe y `gh auth status` está ok.
-   - Existe rama `dev` en origin (`git ls-remote --heads origin dev`). Si NO existe: dile al usuario que este flujo requiere `dev` y ofrece crearla — no la crees sin confirmación.
-   - `git fetch origin` y comprueba que hay trabajo que promover: `git log --oneline origin/dev..HEAD` (commits por delante) o `git status --porcelain` (cambios sin commitear). Si no hay nada, repórtalo y para.
-   - No existe ya un PR abierto `base:main head:dev` (`gh pr list --base main --head dev --state open`). Si existe, detente y repórtalo — no dupliques promociones en curso.
+0. **Preconditions.** Verify before anything; if any fails, inform the user and stop:
+   - `git remote get-url origin` exists and `gh auth status` is ok.
+   - A `dev` branch exists on origin (`git ls-remote --heads origin dev`). If it does NOT: tell the user this flow requires `dev` and offer to create it — do not create it without confirmation.
+   - `git fetch origin` and check there is work to promote: `git log --oneline origin/dev..HEAD` (commits ahead) or `git status --porcelain` (uncommitted changes). If there is nothing, report it and stop.
+   - There is no open PR already `base:main head:dev` (`gh pr list --base main --head dev --state open`). If one exists, stop and report it — do not duplicate in-flight promotions.
 
-1. **Fija la rama de trabajo.** Resuelve `WORK_BRANCH=$(git branch --show-current)` UNA vez, al inicio, y usa ese valor literal en todos los pasos siguientes (push, PR, borrado) — nunca vuelvas a deducir "la rama actual" a mitad de flujo.
-   - Si `WORK_BRANCH` es `main` o `dev` y hay cambios sin commitear: crea una rama `tipo/slug-corto` desde `dev` (tipo = `feat`|`fix`|`chore`), commitea ahí con mensaje convencional, y esa pasa a ser `WORK_BRANCH`. NUNCA commitees directo en `main`/`dev`.
-   - Si `WORK_BRANCH` es una rama de trabajo con cambios sin commitear: commitéalos en ella antes de continuar (nada se promociona sin commit).
-   - Si `WORK_BRANCH` es una rama de trabajo con commits y árbol limpio: úsala tal cual.
+1. **Pin the work branch.** Resolve `WORK_BRANCH=$(git branch --show-current)` ONCE, at the start, and use that literal value in every following step (push, PR, delete) — never re-derive "the current branch" mid-flow.
+   - If `WORK_BRANCH` is `main` or `dev` and there are uncommitted changes: create a branch `type/short-slug` from `dev` (type = `feat`|`fix`|`chore`), commit there with a conventional message, and that becomes `WORK_BRANCH`. NEVER commit directly to `main`/`dev`.
+   - If `WORK_BRANCH` is a work branch with uncommitted changes: commit them on it before continuing (nothing is promoted without a commit).
+   - If `WORK_BRANCH` is a work branch with commits and a clean tree: use it as-is.
 
-2. **PR a dev.** `git push -u origin "$WORK_BRANCH"` y `gh pr create --base dev --head "$WORK_BRANCH"` con cuerpo que incluya "## Summary" y "## Validation" (checklist real de lo verificado en la sesión: tests/typecheck/navegador — no inventes checks que no se ejecutaron). Guarda el número de PR que devuelve.
+2. **PR to dev.** `git push -u origin "$WORK_BRANCH"` and `gh pr create --base dev --head "$WORK_BRANCH"` with a body that includes "## Summary" and "## Validation" (a real checklist of what was verified in the session: tests/typecheck/browser — do not invent checks that were not run). Save the PR number it returns.
 
-3. **Merge a dev.** `gh pr merge <n> --merge --delete-branch` y verifica que quedó fusionado (`gh pr view <n> --json state` → `MERGED`). Si el merge falla o queda bloqueado (checks/protección/conflictos), reporta el motivo y detente — no lo puentees.
+3. **Merge to dev.** `gh pr merge <n> --merge --delete-branch` and verify it merged (`gh pr view <n> --json state` → `MERGED`). If the merge fails or is blocked (checks/protection/conflicts), report the reason and stop — do not bypass it.
 
-4. **GATE hacia main.** Continúa sin preguntar SOLO si los argumentos contienen el token exacto `--yes` como palabra separada. En cualquier otro caso (incluida la duda), PARA aquí y pide confirmación explícita mostrando: el PR ya fusionado en dev y qué se va a promover a producción.
+4. **GATE toward main.** Continue without asking ONLY if the arguments contain the exact token `--yes` as a separate word. In any other case (including doubt), STOP here and ask for explicit confirmation, showing: the PR already merged into dev and what is about to be promoted to production.
 
-5. **PR dev→main.** `gh pr create --base main --head dev --title "Promoción a producción: <resumen>"` con Summary/Validation referenciando el PR anterior; guarda el número, `gh pr merge <n> --merge`, y verifica estado `MERGED` igual que en el paso 3.
+5. **PR dev→main.** `gh pr create --base main --head dev --title "Promote to production: <summary>"` with Summary/Validation referencing the previous PR; save the number, `gh pr merge <n> --merge`, and verify `MERGED` state as in step 3.
 
-6. **Sync local y limpieza.** Requiere `git status --porcelain` limpio (si no lo está, detente y repórtalo). Después: `git checkout dev && git pull --ff-only origin dev`, `git checkout main && git pull --ff-only origin main`, y borra la rama local solo si `WORK_BRANCH` no es `main`/`dev`: `git branch -d "$WORK_BRANCH"` (la remota ya la borró el paso 3). Si `-d` se niega, NO uses `-D`: reporta la rama pendiente. Cierra reportando los últimos 2 commits de `main`.
+6. **Local sync and cleanup.** Requires a clean `git status --porcelain` (if not clean, stop and report). Then: `git checkout dev && git pull --ff-only origin dev`, `git checkout main && git pull --ff-only origin main`, and delete the local branch only if `WORK_BRANCH` is not `main`/`dev`: `git branch -d "$WORK_BRANCH"` (the remote one was already deleted in step 3). If `-d` refuses, do NOT use `-D`: report the pending branch. Close by reporting the last 2 commits of `main`.
 
-7. **Reglas duras.** Nunca `push --force`. Nunca merge local a `main`/`dev`. Tras cada operación `gh`/`git`, verifica su resultado antes del paso siguiente; ante cualquier estado inesperado, detente y reporta en vez de improvisar.
+7. **Hard rules.** Never `push --force`. Never merge locally into `main`/`dev`. After each `gh`/`git` operation, verify its result before the next step; on any unexpected state, stop and report instead of improvising.

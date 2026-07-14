@@ -1,13 +1,13 @@
 ---
 name: pair-review
-description: Pair-review del diff actual con Codex como segundo motor (con fallback). Úsalo tras implementar cambios, antes de commitear.
-argument-hint: "[base-ref | descripción del ámbito]"
+description: "Pair-review the current diff with Codex as a second engine (with fallback). Use after implementing changes, before committing."
+argument-hint: "[base-ref | scope description]"
 ---
 
-1. **Captura el diff.** Usa `git diff` (working tree). Si está limpio, usa `git diff <base-ref>...HEAD` con el ref recibido como argumento, o el último commit si no se dio ninguno. Añade también `git diff --stat`.
+1. **Capture the diff.** Use `git diff` (working tree). If it is clean, use `git diff <base-ref>...HEAD` with the ref passed as argument, or the last commit if none was given. Also add `git diff --stat`.
 
-2. **Si el diff supera ~400 líneas, no lo pegues entero.** Pasa solo el `--stat` y la lista de ficheros cambiados, y ordena a Codex que lea esos ficheros directamente del repo.
+2. **If the diff exceeds ~400 lines, do not paste it whole.** Pass only the `--stat` and the list of changed files, and instruct Codex to read those files directly from the repo.
 
-3. **Lanza el agente `pair-reviewer`** (herramienta Agent, `subagent_type` del plugin) pasándole el diff (o el ámbito) y el directorio de trabajo (cwd) del repo.
+3. **Launch the `pair-reviewer` agent** (Agent tool, the plugin's `subagent_type`), passing it the diff (or the scope) and the repo working directory (cwd).
 
-4. **Al volver:** presenta los findings agrupados por severidad y el veredicto final. Si hay BLOCKERs, no repitas los NITs — prioriza lo bloqueante.
+4. **On return:** present the findings grouped by severity and the final verdict. If there are BLOCKERs, do not repeat the NITs — prioritize what blocks.
