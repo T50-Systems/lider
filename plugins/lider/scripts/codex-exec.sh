@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# codex-exec.sh — wrapper endurecido para invocar Codex CLI sin dejar procesos zombie.
+# codex-exec.sh — hardened wrapper to invoke the Codex CLI without leaving zombie processes.
 #
-# Uso: codex-exec.sh <timeout_s> <out_json> <log_file> <prompt>
+# Usage: codex-exec.sh <timeout_s> <out_json> <log_file> <prompt>
 #
-# Códigos de salida:
-#   0   codex terminó ok Y <out_json> existe y es JSON parseable (la conformidad
-#       con el schema la garantiza el servidor de OpenAI vía --output-schema)
-#   124 timeout (el árbol de procesos de codex fue matado por `timeout`)
-#   3   codex terminó con éxito pero <out_json> no existe o no es JSON válido
-#   127 no se encontró el binario `codex` en PATH
-#   N   cualquier otro código: se propaga el exit code de codex
+# Exit codes:
+#   0   codex finished ok AND <out_json> exists and is parseable JSON (schema
+#       conformance is guaranteed by OpenAI's server via --output-schema)
+#   124 timeout (the codex process tree was killed by `timeout`)
+#   3   codex finished ok but <out_json> is missing or not valid JSON
+#   127 the `codex` binary was not found on PATH
+#   N   any other code: codex's exit code is propagated
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCHEMA="$SCRIPT_DIR/../schemas/findings.schema.json"
 
 if [ "$#" -lt 4 ]; then
-  echo "Uso: codex-exec.sh <timeout_s> <out_json> <log_file> <prompt>" >&2
+  echo "Usage: codex-exec.sh <timeout_s> <out_json> <log_file> <prompt>" >&2
   exit 2
 fi
 
@@ -26,30 +26,30 @@ LOG_FILE="$3"
 shift 3
 PROMPT="$*"
 
-# --- 1. Localizar codex ------------------------------------------------
+# --- 1. Locate codex ---------------------------------------------------
 if ! command -v codex >/dev/null 2>&1; then
   export PATH="$PATH:${APPDATA:-}/npm:${HOME:-}/AppData/Roaming/npm"
 fi
 
 if ! command -v codex >/dev/null 2>&1; then
-  echo "codex-exec.sh: no se encontró el binario 'codex' en PATH (probado también \$APPDATA/npm y \$HOME/AppData/Roaming/npm)." >&2
+  echo "codex-exec.sh: 'codex' binary not found on PATH (also tried \$APPDATA/npm and \$HOME/AppData/Roaming/npm)." >&2
   exit 127
 fi
 
 CODEX_BIN="$(command -v codex)"
 
-# --- 2. Log de cabecera --------------------------------------------------
+# --- 2. Log header -------------------------------------------------------
 {
   echo "=== codex-exec.sh $(date '+%Y-%m-%d %H:%M:%S') ==="
   echo "codex bin: $CODEX_BIN"
   echo "codex --version: $("$CODEX_BIN" --version 2>&1)"
-  echo "timeout usado: ${TIMEOUT_S}s"
+  echo "timeout used: ${TIMEOUT_S}s"
   echo "schema: $SCHEMA"
   echo "out_json: $OUT_JSON"
 } >>"$LOG_FILE" 2>&1
 
-# --- 3. Ejecutar codex -----------------------------------------------------
-# -k 10: si tras el timeout el proceso ignora el TERM, escala a KILL a los 10s.
+# --- 3. Run codex ----------------------------------------------------------
+# -k 10: if the process ignores TERM after the timeout, escalate to KILL after 10s.
 timeout -k 10 "$TIMEOUT_S" "$CODEX_BIN" exec --sandbox read-only --skip-git-repo-check \
   -c "mcp_servers={}" \
   --output-schema "$SCHEMA" \
@@ -57,7 +57,7 @@ timeout -k 10 "$TIMEOUT_S" "$CODEX_BIN" exec --sandbox read-only --skip-git-repo
   "$PROMPT" >>"$LOG_FILE" 2>&1
 CODEX_EXIT=$?
 
-# --- 4. Filtro de ruido conocido + resumen de fallo ------------------------
+# --- 4. Known-noise filter + failure summary -------------------------------
 tail_filtered() {
   grep -v "caveman\|hook: .*Failed\|Skill descriptions were shortened" "$LOG_FILE" | tail -n 5
 }
@@ -69,18 +69,18 @@ fail_summary() {
 }
 
 if [ "$CODEX_EXIT" -eq 124 ]; then
-  fail_summary "timeout tras ${TIMEOUT_S}s, árbol de procesos terminado."
+  fail_summary "timeout after ${TIMEOUT_S}s, process tree terminated."
   exit 124
 fi
 
 if [ "$CODEX_EXIT" -ne 0 ]; then
-  fail_summary "codex terminó con exit code $CODEX_EXIT."
+  fail_summary "codex finished with exit code $CODEX_EXIT."
   exit "$CODEX_EXIT"
 fi
 
-# codex salió 0: validar que OUT_JSON existe y es JSON parseable
+# codex exited 0: check that OUT_JSON exists and is parseable JSON
 if [ ! -s "$OUT_JSON" ]; then
-  fail_summary "codex terminó ok pero '$OUT_JSON' no existe o está vacío."
+  fail_summary "codex finished ok but '$OUT_JSON' is missing or empty."
   exit 3
 fi
 
@@ -94,16 +94,16 @@ fi
 
 if [ -n "$PYTHON_BIN" ]; then
   if ! "$PYTHON_BIN" -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" "$OUT_JSON" >>"$LOG_FILE" 2>&1; then
-    fail_summary "codex terminó ok pero '$OUT_JSON' no es JSON válido."
+    fail_summary "codex finished ok but '$OUT_JSON' is not valid JSON."
     exit 3
   fi
 elif command -v node >/dev/null 2>&1; then
-  # Fallback: node está garantizado allí donde corre Claude Code.
+  # Fallback: node is guaranteed wherever Claude Code runs.
   if ! node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$OUT_JSON" >>"$LOG_FILE" 2>&1; then
-    fail_summary "codex terminó ok pero '$OUT_JSON' no es JSON válido."
+    fail_summary "codex finished ok but '$OUT_JSON' is not valid JSON."
     exit 3
   fi
 fi
 
-echo "codex-exec.sh: ok ($OUT_JSON válido)." >>"$LOG_FILE" 2>&1
+echo "codex-exec.sh: ok ($OUT_JSON valid)." >>"$LOG_FILE" 2>&1
 exit 0

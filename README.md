@@ -1,26 +1,26 @@
 # lider
 
-Plugin de Claude Code que orquesta nuestro flujo de trabajo, **agnóstico de motor**: el arquitecto especifica y adjudica, un implementador ejecuta, un segundo motor revisa (Codex hoy, con fallback a Claude si no está), y el trabajo se promociona por PRs. Se distribuye en el marketplace `t50`.
+A Claude Code plugin that orchestrates our workflow, **engine-agnostic**: the architect specs and adjudicates, an implementer executes, a second engine reviews (Codex today, with a fallback to Claude when it is unavailable), and the work is promoted through PRs. Distributed via the `t50` marketplace.
 
 ## Skills
 
-- `/pair-review [ámbito]` — revisión independiente del diff actual con un segundo motor; sin procesos zombie (timeout duro), salida estructurada, y fallback a revisión propia si el segundo motor no responde.
-- `/pipeline <descripción>` — una fase completa: spec cerrada → implementador en background → pair-review → adjudicación finding a finding → verificación → commit del arquitecto → promoción.
-- `/promote [--yes] [título]` — promoción por PRs: rama → PR a `dev` → merge → gate a producción → PR `dev`→`main` → merge → sync local.
+- `/pair-review [scope]` — independent review of the current diff with a second engine; no zombie processes (hard timeout), structured output, and a fallback to reviewing it ourselves if the second engine does not respond.
+- `/pipeline <description>` — a full phase: closed spec → background implementer → pair-review → finding-by-finding adjudication → verification → architect commit → promotion.
+- `/promote [--yes] [title]` — PR promotion: branch → PR to `dev` → merge → production gate → PR `dev`→`main` → merge → local sync.
 
-## Piezas
+## Pieces
 
-- `scripts/codex-exec.sh` — wrapper endurecido del segundo motor (timeout con escalada a SIGKILL, config aislada por invocación, JSON validado).
-- `agents/pair-reviewer.md` — agente revisor con fallback obligatorio.
-- `schemas/findings.schema.json` — contrato de salida (engine, verdict, findings).
+- `scripts/codex-exec.sh` — hardened wrapper for the second engine (timeout with escalation to SIGKILL, config isolated per invocation, validated JSON).
+- `agents/pair-reviewer.md` — reviewer agent with a mandatory fallback.
+- `schemas/findings.schema.json` — output contract (engine, verdict, findings).
 
-## Requisitos
+## Requirements
 
-- Segundo motor de revisión: Codex CLI >= 0.144.1 en PATH (`codex --version`). Sin él, `/pair-review` cae al fallback de Claude.
+- Second review engine: Codex CLI >= 0.144.1 on PATH (`codex --version`). Without it, `/pair-review` falls back to Claude.
 
-## Instalación
+## Installation
 
-Desde Claude Code:
+From Claude Code:
 
 ```
 /plugin marketplace add C:\dev\lider

@@ -1,5 +1,5 @@
 {
   "name": "lider",
   "version": "0.2.0",
-  "description": "Líder: orquestador agnóstico de motor de tu flujo — pair-review con segundo motor (con fallback), pipeline de fase y promoción por PRs. Skills: /pair-review, /promote, /pipeline."
+  "description": "Lider: engine-agnostic workflow orchestrator - pair-review with a second engine (with fallback), phase pipeline, and PR promotion. Skills: /pair-review, /promote, /pipeline."
 }
