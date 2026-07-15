@@ -21,9 +21,16 @@ _CODEX_RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_CODEX_RUNTIME_DIR/codex-home-iso.sh"
 
 # Coerce a value to a base-10 non-negative integer, else fall back to a default.
-# The 10# guard prevents values like "08" from being read as (invalid) octal in
-# later arithmetic.
-_int() { case "${1:-}" in ''|*[!0-9]*) echo "$2" ;; *) echo "$((10#$1))" ;; esac; }
+# The 10# guard prevents "08" being read as (invalid) octal; the length guard
+# rejects absurdly long digit strings that would overflow signed arithmetic to a
+# negative value and slip past later upper-bound clamps.
+_int() {
+  case "${1:-}" in
+    ''|*[!0-9]*) echo "$2"; return ;;
+  esac
+  [ "${#1}" -gt 9 ] && { echo "$2"; return; }
+  echo "$((10#$1))"
+}
 
 CODEX_POLL_S="$(_int "${CODEX_POLL_S:-}" 5)";       [ "$CODEX_POLL_S" -ge 1 ] || CODEX_POLL_S=5
 CODEX_HEARTBEAT_S="$(_int "${CODEX_HEARTBEAT_S:-}" 10)"; [ "$CODEX_HEARTBEAT_S" -ge 1 ] || CODEX_HEARTBEAT_S=10
@@ -33,6 +40,11 @@ _CODEX_CURRENT_TPID=""   # pid of the live `timeout` child
 _CODEX_STATUS_FILE=""    # status file for the active run
 _CODEX_TOOL=""           # tool label for the active run
 _CODEX_DONE_FILE=""      # optional: wrapper sets this so the trap can mark <done>
+_CODEX_STARTED=0         # run start epoch (for status started_at / resume checks)
+
+# Output of _last_activity (display hint; authoritative in-flight is incremental).
+LAST_ACT=""              # human "what Codex is doing now"
+LF=$'\n'                 # newline, for line-aligned incremental parsing
 
 # --- process helpers -------------------------------------------------------
 _now() { date +%s; }
@@ -107,16 +119,17 @@ _json_escape() {
   printf '%s' "${1:-}" | LC_ALL=C tr -d '\000-\037\177-\377' | cut -c1-180 | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# Extract a short, human "what is Codex doing right now" from the log tail, by
-# reading Codex's own stream markers: `exec` (a shell command), `+++ b/<file>`
-# (a file being written), `codex` (its message/plan), a command result, or the
-# closing token count. The most recent event in the tail wins.
+# Set LAST_ACT to a short human "what Codex is doing right now", read from its
+# stream markers in the log tail (the most recent event wins). This is a DISPLAY
+# hint only; the authoritative in-flight state for the watchdog is tracked
+# incrementally by _inflight_delta (which the bounded tail here cannot lose).
 _last_activity() {
   local log="$1"
-  [ -s "$log" ] || { echo ""; return; }
-  # Bound the work by BYTES then lines, so a few huge diff lines can't make each
+  LAST_ACT=""
+  [ -s "$log" ] || return 0
+  # Bound the work by BYTES then lines so a few huge diff lines can't make each
   # poll scan a large suffix. Strip CSI/OSC terminal sequences (not just SGR).
-  tail -c 20000 "$log" 2>/dev/null | tail -n 80 \
+  LAST_ACT="$(tail -c 20000 "$log" 2>/dev/null | tail -n 80 \
     | sed 's/\x1b\[[0-9;?]*[ -/]*[@-~]//g; s/\x1b\][^\x07]*\x07//g' \
     | awk '
         function nextline(  r) { c=""; r=getline c; if (r<=0) c=""; gsub(/^[ \t]+/,"",c); return c }
@@ -124,12 +137,31 @@ _last_activity() {
         /^\+\+\+ b\//            { f=$0; sub(/^\+\+\+ b\//,"",f); act="edit: " f; next }
         /^apply patch$/          { act="edit: applying patch"; next }
         / succeeded in [0-9]+ms/ { act="cmd ok"; next }
-        / exited [0-9]+ /        { act="cmd finished"; next }
+        / failed in [0-9]+ms/    { act="cmd failed"; next }
+        / exited [0-9]+ /        { act="cmd exited"; next }
         /^codex$/                { nextline(); if (c!="") act="say: " c; next }
         /^tokens used$/          { act="finalizing (counting tokens)"; next }
         END { print act }
-      ' \
-    | cut -c1-140
+      ' | cut -c1-140)"
+}
+
+# Read a NEW log chunk on stdin and echo the last command open/close transition
+# in it: "1" (a command started), "0" (one finished / Codex is talking again), or
+# "-" (no transition — caller keeps the previous state). Tracking transitions
+# incrementally over appended bytes — instead of recomputing from a bounded tail —
+# means a verbose command that scrolls its `exec` marker out of the display window
+# can never flip in-flight state and get a healthy command killed.
+_inflight_delta() {
+  awk '
+    /^exec$/                 { st=1; seen=1; next }
+    / succeeded in [0-9]+ms/ { st=0; seen=1; next }
+    / failed in [0-9]+ms/    { st=0; seen=1; next }
+    / exited [0-9]+ /        { st=0; seen=1; next }
+    /^apply patch$/          { st=0; seen=1; next }
+    /^codex$/                { st=0; seen=1; next }
+    /^tokens used$/          { st=0; seen=1; next }
+    END { print (seen ? st : "-") }
+  '
 }
 
 # Heartbeat -> STDOUT (the background panel), never the measured <log>.
@@ -146,8 +178,10 @@ _write_status() {
   [ -n "$f" ] || return 0
   local rsn act; rsn="$(_json_escape "${10:-}")"; act="$(_json_escape "${11:-}")"
   local tmp="${f}.tmp.$$"
-  printf '{"tool":"%s","state":"%s","attempt":%s,"max_attempts":%s,"pid":%s,"elapsed_s":%s,"idle_s":%s,"log_bytes":%s,"exit":%s,"reason":"%s","activity":"%s"}\n' \
-    "$1" "$2" "$3" "$4" "${5:-null}" "${6:-0}" "${7:-0}" "${8:-0}" "${9:-null}" "$rsn" "$act" >"$tmp" 2>/dev/null
+  # updated_at lets a resumed orchestrator tell a truly-running task (fresh
+  # updated_at) from an orphaned status left by a dead wrapper (stale + dead pid).
+  printf '{"tool":"%s","state":"%s","attempt":%s,"max_attempts":%s,"pid":%s,"elapsed_s":%s,"idle_s":%s,"log_bytes":%s,"exit":%s,"reason":"%s","activity":"%s","started_at":%s,"updated_at":%s}\n' \
+    "$1" "$2" "$3" "$4" "${5:-null}" "${6:-0}" "${7:-0}" "${8:-0}" "${9:-null}" "$rsn" "$act" "${_CODEX_STARTED:-0}" "$(_now)" >"$tmp" 2>/dev/null
   mv -f "$tmp" "$f" 2>/dev/null || true
 }
 
@@ -159,9 +193,9 @@ _supervise_once() {
   shift 8
   [ "${1:-}" = "--" ] && shift
 
-  local start now elapsed idle bytes baseline prev_bytes last_out last_hb grew rc reason tpid final_state act new_act
-  start="$(_now)"; last_out="$start"; last_hb="$start"; grew=0; reason=""; act=""; new_act=""
-  baseline="$(_fsize "$log")"; prev_bytes="$baseline"   # ignore the pre-launch header
+  local start now elapsed idle bytes baseline prev_bytes last_out last_hb grew rc reason tpid final_state act inflight disp off chunk complete d
+  start="$(_now)"; last_out="$start"; last_hb="$start"; grew=0; reason=""; act=""; inflight=0; disp=""
+  baseline="$(_fsize "$log")"; prev_bytes="$baseline"; off="$baseline"   # ignore the pre-launch header
 
   _CODEX_STATUS_FILE="$status"; _CODEX_TOOL="$tool"
   _write_status "$status" "$tool" "starting" "$attempt" "$max" "null" 0 0 0 "null" "" ""
@@ -182,16 +216,33 @@ _supervise_once() {
     bytes="$(_fsize "$log")"
     if [ "$bytes" -gt "$prev_bytes" ]; then last_out="$now"; prev_bytes="$bytes"; grew=1; fi
     idle=$((now - last_out))
-    new_act="$(_last_activity "$log")"; [ -n "$new_act" ] && act="$new_act"  # sticky: keep last known
+    # In-flight tracked incrementally over the newly-appended bytes (robust to the
+    # display window). Process ONLY through the last complete line and advance the
+    # offset by exactly those bytes, so a line split across two polls is never
+    # lost (its two halves would otherwise match no marker). Activity TEXT still
+    # comes from the tail (a display hint).
+    chunk="$(tail -c "+$((off + 1))" "$log" 2>/dev/null)"
+    case "$chunk" in
+      *"$LF"*)
+        complete="${chunk%"$LF"*}$LF"
+        off=$(( off + $(printf '%s' "$complete" | wc -c) ))
+        d="$(printf '%s' "$complete" | _inflight_delta)"; [ "$d" != "-" ] && inflight="$d"
+        ;;
+      *) : ;;   # no complete line yet — wait, keep the offset
+    esac
+    _last_activity "$log"; [ -n "$LAST_ACT" ] && act="$LAST_ACT"   # sticky act
+    disp="$act"; [ "$inflight" = "1" ] && disp="$act (running ${idle}s)"
 
-    _write_status "$status" "$tool" "running" "$attempt" "$max" "$tpid" "$elapsed" "$idle" "$bytes" "null" "" "$act"
+    _write_status "$status" "$tool" "running" "$attempt" "$max" "$tpid" "$elapsed" "$idle" "$bytes" "null" "" "$disp"
     if [ $((now - last_hb)) -ge "$CODEX_HEARTBEAT_S" ]; then
-      _heartbeat "$tool" "$attempt" "$max" "$elapsed" "$idle" "$bytes" "$act"; last_hb="$now"
+      _heartbeat "$tool" "$attempt" "$max" "$elapsed" "$idle" "$bytes" "$disp"; last_hb="$now"
     fi
 
     # Watchdogs. The hard timeout is enforced by `timeout` itself (-> rc 124).
     if [ "$grew" -eq 0 ] && [ "$elapsed" -ge "$startup_s" ]; then reason="startup-failed"; break; fi
-    if [ "$grew" -eq 1 ] && [ "$idle" -ge "$stall_s" ]; then reason="stalled"; break; fi
+    # Stall only when Codex itself is idle — NOT while a shell command is running
+    # (its silence is expected; the hard timeout bounds a runaway command).
+    if [ "$grew" -eq 1 ] && [ "$inflight" != "1" ] && [ "$idle" -ge "$stall_s" ]; then reason="stalled"; break; fi
   done
 
   if [ -n "$reason" ]; then
@@ -214,10 +265,40 @@ _supervise_once() {
 
   elapsed=$(( $(_now) - start ))
   bytes="$(_fsize "$log")"
-  new_act="$(_last_activity "$log")"; [ -n "$new_act" ] && act="$new_act"
+  _last_activity "$log"; [ -n "$LAST_ACT" ] && act="$LAST_ACT"
   final_state="done"; [ "$rc" -ne 0 ] && final_state="failed"
   _write_status "$status" "$tool" "$final_state" "$attempt" "$max" "null" "$elapsed" 0 "$bytes" "$rc" "$reason" "$act"
   return "$rc"
+}
+
+# Classify an attempt's outcome for the retry decision, from the exit code and
+# the log tail:  done | retry | auth | fatal.
+#  - 124/125 (timeout/watchdog) are always transient → retry.
+#  - 2/127 (bad usage / codex missing) are permanent → fatal.
+#  - other non-zero: sniff the tail. Transient API/network signatures → retry;
+#    auth-failure signatures → auth (actionable, NOT retried — retrying a 401
+#    just burns attempts); anything else → fatal (a deterministic error recurs).
+# NB (D, inverted): we deliberately do NOT re-copy auth.json between attempts.
+# OAuth refresh tokens rotate inside the isolated home during an attempt; copying
+# the older real-home token back over a rotated one could itself induce a 401.
+_retry_class() {
+  local rc="$1" log="$2" from="${3:-0}" t
+  case "$rc" in
+    0) echo done; return ;;
+    124|125) echo retry; return ;;
+    2|127) echo fatal; return ;;
+  esac
+  # Heuristic: classify only THIS attempt's output (from its start offset), and
+  # only its error tail — never the cumulative transcript (a prior attempt's 429,
+  # prompt text, or code could otherwise misclassify the current failure).
+  t="$(tail -c "+$((from + 1))" "$log" 2>/dev/null | tail -c 2000 | tr 'A-Z' 'a-z')"
+  case "$t" in
+    *unauthorized*|*"not logged in"*|*"invalid api key"*|*"authentication failed"*|*"401 "*|*"token expired"*|*"codex login"*|*"please log in"*) echo auth; return ;;
+  esac
+  case "$t" in
+    *" 429"*|*"429 "*|*"too many requests"*|*"rate limit"*|*" 500"*|*" 502"*|*" 503"*|*" 504"*|*" 408"*|*"internal server error"*|*"bad gateway"*|*"service unavailable"*|*"gateway timeout"*|*overloaded*|*econnreset*|*etimedout*|*"stream disconnected"*|*"connection reset"*|*"temporarily unavailable"*|*"timed out"*) echo retry; return ;;
+  esac
+  echo fatal
 }
 
 # Public entry point: retry-wrapped supervised run.
@@ -232,25 +313,43 @@ run_supervised() {
   case "$timeout_s" in ''|*[!0-9]*) echo "run_supervised: invalid timeout '$timeout_s'" >&2; return 2 ;; esac
   [ "$timeout_s" -ge 1 ] || { echo "run_supervised: timeout must be >= 1s" >&2; return 2; }
   stall_s="$(_int "$stall_s" 300)"; startup_s="$(_int "$startup_s" 60)"
-  retries="$(_int "$retries" 0)"; backoff_s="$(_int "$backoff_s" 5)"
+  retries="$(_int "$retries" 0)"; [ "$retries" -gt 10 ] && retries=10
+  backoff_s="$(_int "$backoff_s" 5)"; [ "$backoff_s" -gt 60 ] && backoff_s=60
 
+  _CODEX_STARTED="$(_now)"
   trap '_codex_on_signal' INT TERM
-  local maxa=$((retries + 1)) attempt=0 rc=0
+  local maxa=$((retries + 1)) attempt=0 rc=0 class delay jitter expn astart
   while :; do
     attempt=$((attempt + 1))
+    astart="$(_fsize "$log")"   # this attempt's start offset (for classification)
     _supervise_once "$tool" "$timeout_s" "$log" "$status" "$stall_s" "$startup_s" "$attempt" "$maxa" -- "$@"
     rc=$?
-    # Retry ONLY transient outcomes (hard timeout / watchdog abort). A codex
-    # error, missing binary, or bad usage is not retried — it would just recur.
-    case "$rc" in
-      124|125) : ;;
-      *) break ;;
+    class="$(_retry_class "$rc" "$log" "$astart")"
+    case "$class" in
+      done) break ;;
+      auth) echo "codex/$tool: authentication failed — run 'codex login', then retry. Not auto-retrying." >&2; break ;;
+      fatal) break ;;
+      retry) : ;;
     esac
     [ "$attempt" -ge "$maxa" ] && break
-    printf '[%s] codex/%s attempt %s hit exit %s; retrying in %ss...\n' \
-      "$(date +%H:%M:%S)" "$tool" "$attempt" "$rc" "$backoff_s"
+    # Optional retry precondition (e.g. reset a dirty working tree to a clean
+    # checkpoint). If it can't be satisfied, do NOT retry — retrying over a
+    # half-written tree is unsafe.
+    if [ -n "${CODEX_RETRY_HOOK:-}" ] && ! "$CODEX_RETRY_HOOK"; then
+      echo "codex/$tool: retry precondition failed; not retrying." >&2; break
+    fi
+    # Exponential backoff with jitter, capped, so retries don't hammer a
+    # rate-limited API in lock-step. Cap the exponent (retries<=10) and saturate
+    # BEFORE and AFTER jitter so the total never exceeds 60s or overflows.
+    expn=$((attempt - 1)); [ "$expn" -gt 6 ] && expn=6
+    delay=$(( backoff_s * (1 << expn) ))
+    [ "$delay" -gt 60 ] && delay=60
+    jitter=$(( backoff_s > 0 ? RANDOM % backoff_s : 0 ))
+    delay=$(( delay + jitter )); [ "$delay" -gt 60 ] && delay=60
+    printf '[%s] codex/%s attempt %s hit exit %s (%s); retrying in %ss...\n' \
+      "$(date +%H:%M:%S)" "$tool" "$attempt" "$rc" "$class" "$delay"
     _write_status "$status" "$tool" "retrying" "$attempt" "$maxa" "null" 0 0 0 "$rc" "retry" ""
-    sleep "$backoff_s"
+    sleep "$delay"
   done
   # Intentionally leave the INT/TERM trap installed: it must still cover the
   # caller's post-return work (e.g. codex-implement writing <done>) so a signal
