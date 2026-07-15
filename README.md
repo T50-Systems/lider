@@ -4,7 +4,7 @@ A Claude Code plugin that orchestrates the T50 engineering flow, **engine-agnost
 
 The design goal is a flow that is **resilient, observable, and self-recovering**: you always know what each engine is doing, failures surface in minutes (not at a timeout), transient errors recover automatically and safely, and no orphaned processes are ever left behind.
 
-For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For copy-paste prompts to drive it from another session, see [docs/USAGE.md](docs/USAGE.md).
 
 ## Skills
 
