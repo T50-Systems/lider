@@ -10,7 +10,10 @@ A Claude Code plugin that orchestrates our workflow, **engine-agnostic**: the ar
 
 ## Pieces
 
-- `scripts/codex-exec.sh` — hardened wrapper for the second engine (timeout with escalation to SIGKILL, config isolated per invocation, validated JSON).
+- `scripts/codex-exec.sh` — hardened **review** wrapper for the second engine (read-only sandbox, optional `--model <slug>`, timeout with escalation to SIGKILL, isolated per invocation, validated JSON).
+- `scripts/codex-implement.sh` — Lider-owned **implementer** wrapper: `codex exec` with full access (`danger-full-access`, no approvals), isolated `CODEX_HOME`, background-friendly (writes its exit code to a `<done>` file for a watcher). Used by `/pipeline` so the implementer is not capped at the Codex plugin's `workspace-write`.
+- `scripts/codex-runtime.sh` — shared supervision layer both wrappers source: preflight, plus `run_supervised` (stdout heartbeat + live `<log>.status.json` that narrate what Codex is doing right now — `exec:`/`edit:`/`say:` extracted from its stream — not just a pulse; inactivity/startup watchdog → fast-fail as exit 125; hardened process-tree kill with a SIGTERM trap so no orphans; bounded retry). Keeps `timeout -k 10` as the hard backstop.
+- `scripts/codex-home-iso.sh` — shared helper (sourced by the runtime) to run Codex against a throwaway `CODEX_HOME` (no user plugins/skills/hooks/memories), so invocations are fast and deterministic.
 - `agents/pair-reviewer.md` — reviewer agent with a mandatory fallback.
 - `schemas/findings.schema.json` — output contract (engine, verdict, findings).
 
