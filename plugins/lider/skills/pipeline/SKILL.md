@@ -46,9 +46,16 @@ Do not escalate by size — escalate by decision density. The implementer does n
 ```
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-implement.sh" <timeout_s> <log> <done> <model_slug> "<prompt>"
 ```
-- **Launch it with the Bash tool's background mode** — it is the long-running implementer. `<log>` and `<done>` are temp files in the session temp dir; the wrapper writes the task's final exit code to `<done>` when it finishes.
+- **Launch it DIRECTLY with the Bash tool's background mode — do NOT redirect or swallow its stdout.** The wrapper streams codex's own output to `<log>` internally and prints a heartbeat to ITS stdout every ~10s; as a background task that heartbeat is what narrates the run in the panel. `<log>`/`<done>` are temp files in the session temp dir; the wrapper writes the final exit code to `<done>` when done.
 - The wrapper runs in the **current working directory** — `cd` into the intended repo/worktree first (the isolated `CODEX_HOME` does not change where the task writes).
 - **Always pass an explicit `<model_slug>`** — the Codex default is `gpt-5.5` (disallowed). Terra/Sol/Luna use their full slug above. Never a Fast/priority tier.
+
+**VISIBILITY IS MANDATORY — the user must be able to see the run at all times. This is where past runs failed; it is not optional:**
+- ✅ **Launch `codex-implement.sh` directly in background** and leave its stdout alone → its ~10s heartbeat (`codex/implement … | exec: … (running Ns)`) streams live into the task panel.
+- ❌ **NEVER wrap it in "run, then dump the log at the end"** (e.g. `codex …; Get-Content <log> -Last 60`, or capturing to a file and `cat`-ing on exit). That hides everything until the task finishes — the exact failure to avoid.
+- ❌ **NEVER build a separate blind anti-hang loop** (`Start-Sleep 780; check …`). The wrapper already self-supervises — its command-aware watchdog fast-fails a real hang as exit 125. A manual long sleep is both redundant AND blind. Forbidden.
+- ✅ **Surface progress to the MAIN thread every ~1–2 min:** read `<log>.status.json` and report ONE line to the user — `state` + `activity` + `idle_s` (e.g. `Terra: running · editing stat-tile.tsx · idle 3s`). The status file is rewritten every poll and is always readable, so the user sees progress without expanding the panel.
+- If you cannot see live output, the launch is wrong (stdout swallowed, or the wrapper not used) — **fix the launch; do not proceed blind.**
 
 **⚠️ Full access is real.** `danger-full-access` lets the implementer write anywhere on disk and use the network with no confirmation. That is intended (it removes the `workspace-write` confinement below), but scope the task prompt tightly and keep the watcher armed.
 
@@ -89,7 +96,7 @@ The GPT-5.3-Codex reviewer is realized by the Codex code-review path (model `cod
 
 2. **Implementer.** If the user pinned an implementer (`--impl codex|opus|fable`), use it per *Manual engine override*. If they did NOT pin one, **ask which engine implements** (codex / opus / fable) per that section before launching — unless the request already makes it unambiguous, in which case route by decision density (Luna mechanical / Terra default / Sol open decisions / Sonnet fallback). Launch in the background with the full spec. The implementer does not decide architecture and does NOT commit; it reports deviations with a reason.
 
-   **Background visibility rule.** EVERY background task in this flow (implementer runs, status-polling loops, monitors, QA servers) must emit periodic visible output — at minimum one heartbeat line per poll iteration with timestamp, phase, and elapsed time (e.g. `[14:32:01] Phase: running | Elapsed: 12m | last: <event>`). Never launch a silent `while` loop that only prints on exit: the user sees the task panel, and a mute loop is indistinguishable from a hang.
+   **Background visibility rule (see *VISIBILITY IS MANDATORY* above — enforce it).** EVERY background task in this flow must stream visible output as it runs, never only on exit. For the implementer, that means launching `codex-implement.sh` directly so its heartbeat streams — NOT wrapping it in a run-then-`cat`-the-log command, and NOT pairing it with a blind `Start-Sleep <minutes>` anti-hang (the wrapper's watchdog already covers hangs). Any other background loop (QA servers, status pollers) must print one line per short iteration with timestamp/phase/elapsed. A mute task is indistinguishable from a hang.
 
 3. **Pair-review.** When the implementer finishes, review the resulting diff (the uncommitted working tree; if the implementer worked on a branch, that branch's diff against `origin/dev`) with an engine **different from the implementer**. If an implementer was pinned, the reviewer is the opposite engine per the override table (**codex→Opus** review yourself; **opus→Codex** and **fable→Codex** via `codex-exec.sh --model gpt-5.6-sol`). Otherwise use the reviewer table: invoke this plugin's `pair-review` skill when Claude implemented; review with Opus yourself (or GPT-5.3-Codex for Luna) when OpenAI implemented.
 
