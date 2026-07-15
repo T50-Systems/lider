@@ -9,8 +9,8 @@ Replace `[TASK]` with what you want built:
 ```text
 Usa el plugin `lider` (marketplace t50) para esta tarea: [TASK].
 
-Corre `/pipeline [descripción breve] --impl codex` (o `--impl opus` si quieres que
-implemente Claude). El flujo: Fable escribe un spec cerrado → el implementador
+Corre `/pipeline [descripción breve]` — si no fijas `--impl codex|opus|fable`, el
+pipeline te pregunta qué motor implementa. El flujo: Fable escribe un spec cerrado → el implementador
 elegido ejecuta en background con acceso total y auto-recuperación → el motor
 OPUESTO revisa (regla cross-engine) → adjudicación contra el spec → verificación.
 
@@ -48,7 +48,10 @@ Pin the implementer/reviewer engines explicitly:
 ```text
 /pipeline <descripción> --impl codex   # Codex implementa, Opus revisa
 /pipeline <descripción> --impl opus    # Opus implementa, Codex/Sol revisa
+/pipeline <descripción> --impl fable   # Fable implementa, Codex/Sol revisa
 ```
+
+Si no fijas `--impl`, el pipeline **te pregunta** qué motor implementa (codex / opus / fable) antes de arrancar.
 
 ## Monitoring a background implementer
 

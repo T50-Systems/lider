@@ -1,7 +1,7 @@
 ---
 name: pipeline
 description: "Run a full phase of the T50 flow - closed architect spec, decision-density-routed implementer, independent review by a different engine, adjudication, verification, PR promotion, with cost-aware engine allocation. Use for scoped features with an optional final human sign-off."
-argument-hint: "<phase or feature description> [--impl codex|opus]"
+argument-hint: "<phase or feature description> [--impl codex|opus|fable]"
 ---
 
 You act as the architect. Follow the flow in order; do not skip steps.
@@ -18,14 +18,17 @@ Frontier models are expensive on OUTPUT — spend them on judgment, not volume. 
 
 **Step 1B challenger (optional): GPT-5.6 Sol** (`--model gpt-5.6-sol`). Activate ONLY for high-risk features — security/authorization, concurrency, transactions, data migrations, architectural changes, external contracts, financial logic, high ambiguity, large blast radius. Sol tries to break the plan (false assumptions, unhandled states, races, incompatibilities, rollback difficulty, missing observability). Skip for routine tickets.
 
-**Manual engine override (when the user asks — takes precedence over the routing below).** The user may pin the implementer for a run: `--impl codex` / `--impl opus`, or in words ("implementa con opus", "que codex implemente"). When set, it overrides decision-density routing for step 2 and **forces the reviewer to the opposite engine** in step 3 — the cross-engine rule (reviewer ≠ implementer) is preserved automatically:
+**Manual engine override (takes precedence over the routing below).** The user may pin the implementer for a run: `--impl codex` / `--impl opus` / `--impl fable`, or in words ("implementa con opus", "que fable implemente"). When set, it overrides decision-density routing for step 2 and **forces the reviewer to the opposite engine** in step 3 — the cross-engine rule (reviewer ≠ implementer) is preserved automatically:
 
 | Requested implementer | Step 2 implementer | Step 3 reviewer (opposite) |
 |---|---|---|
 | **codex** | Codex via `scripts/codex-implement.sh` — Terra by default; Luna/Sol still allowed by decision density *within the Codex family* | **Opus** — review the diff yourself as Opus (NOT `pair-review`) |
 | **opus** | **Opus** — a background `general-purpose` subagent (`model: opus`) implementing from the closed spec (does NOT commit; reports deviations) | **Codex** — `codex-exec.sh --model gpt-5.6-terra` (or `gpt-5.6-sol`): Lider-owned, read-only, findings schema |
+| **fable** | **Fable** — a background `general-purpose` subagent (`model: fable`) implementing from the closed spec (does NOT commit; reports deviations) | **Codex** — `codex-exec.sh --model gpt-5.6-sol`: Lider-owned, read-only, findings schema |
 
-Only `codex` and `opus` are selectable as the pinned implementer. If the requested engine is unavailable, say so and fall back per the tier rules rather than silently swapping the reviewer to the same family. Without an override, use the decision-density routing below.
+**If the user did NOT pin an implementer, ASK before launching step 2** — offer **codex** (Terra/Sol, full-access wrapper), **opus**, or **fable**, with the one-line trade-off (codex = highest throughput + isolation; opus/fable = Claude-side, reviewed by Codex). Use their answer as the pin. Only skip the question if the user's message already makes the engine unambiguous (an explicit `--impl`, "usa codex", a mechanical ticket that clearly wants Luna, etc.).
+
+Only `codex`, `opus`, and `fable` are selectable as the pinned implementer. If the requested engine is unavailable, say so and fall back per the tier rules rather than silently swapping the reviewer to the same family.
 
 **Step 2 implementer — route by decision density (OpenAI models via the `codex` plugin):**
 
@@ -84,11 +87,11 @@ The GPT-5.3-Codex reviewer is realized by the Codex code-review path (model `cod
 
    Classify risk. For high-risk features only, run **step 1B** — have GPT-5.6 Sol pressure-test the plan (see allocation) before implementing.
 
-2. **Implementer.** If the user pinned an implementer (`--impl codex|opus`), use it per *Manual engine override* — otherwise route per *Engine & model allocation* by decision density (Luna mechanical / Terra default / Sol open decisions / Sonnet fallback). Launch in the background with the full spec. The implementer does not decide architecture and does NOT commit; it reports deviations with a reason.
+2. **Implementer.** If the user pinned an implementer (`--impl codex|opus|fable`), use it per *Manual engine override*. If they did NOT pin one, **ask which engine implements** (codex / opus / fable) per that section before launching — unless the request already makes it unambiguous, in which case route by decision density (Luna mechanical / Terra default / Sol open decisions / Sonnet fallback). Launch in the background with the full spec. The implementer does not decide architecture and does NOT commit; it reports deviations with a reason.
 
    **Background visibility rule.** EVERY background task in this flow (implementer runs, status-polling loops, monitors, QA servers) must emit periodic visible output — at minimum one heartbeat line per poll iteration with timestamp, phase, and elapsed time (e.g. `[14:32:01] Phase: running | Elapsed: 12m | last: <event>`). Never launch a silent `while` loop that only prints on exit: the user sees the task panel, and a mute loop is indistinguishable from a hang.
 
-3. **Pair-review.** When the implementer finishes, review the resulting diff (the uncommitted working tree; if the implementer worked on a branch, that branch's diff against `origin/dev`) with an engine **different from the implementer**. If an implementer was pinned, the reviewer is the opposite engine per the override table (**codex→Opus** review yourself; **opus→Codex** via `pair-review`). Otherwise use the reviewer table: invoke this plugin's `pair-review` skill when Claude implemented; review with Opus yourself (or GPT-5.3-Codex for Luna) when OpenAI implemented.
+3. **Pair-review.** When the implementer finishes, review the resulting diff (the uncommitted working tree; if the implementer worked on a branch, that branch's diff against `origin/dev`) with an engine **different from the implementer**. If an implementer was pinned, the reviewer is the opposite engine per the override table (**codex→Opus** review yourself; **opus→Codex** and **fable→Codex** via `codex-exec.sh --model gpt-5.6-sol`). Otherwise use the reviewer table: invoke this plugin's `pair-review` skill when Claude implemented; review with Opus yourself (or GPT-5.3-Codex for Luna) when OpenAI implemented.
 
 4. **Adjudication.** Architect seat (Fable), against the spec — contracts, invariants, acceptance criteria, authorized risks, scope. For each finding, decide and record it: ACCEPT / accept with small fixes / return to the implementer / change the spec / reject and reimplement / escalate to human review. Do not adjudicate by "who seems right"; do not apply findings blindly.
 
