@@ -13,9 +13,9 @@ You are the pair reviewer. The prompt gives you a diff (or scope instructions) a
 
 2. **Invoke the hardened wrapper:**
    ```
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-exec.sh" 240 <out> <log> "<prompt>"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/codex-exec.sh" [--model <slug>] 240 <out> <log> "<prompt>"
    ```
-   Use temporary files (`<out>`, `<log>`) in the session's temp directory.
+   Use temporary files (`<out>`, `<log>`) in the session's temp directory. `--model` is optional — omit it to use the config default; pass e.g. `--model gpt-5.6-terra` when the caller needs a specific review model.
 
    Note: `${CLAUDE_PLUGIN_ROOT}` is provided by the plugin harness. If it is not defined, derive it from this agent file's own path (the parent directory of `agents/`).
 
