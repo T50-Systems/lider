@@ -142,7 +142,7 @@ Both are thin: locate `codex`, source the runtime, run preflight, set up the iso
 | Open decisions / hard debugging | **Sol** (Codex) | Where judgment under uncertainty matters |
 | Review | **≠ implementer** | Same-engine review shares blind spots |
 
-The reviewer table enforces cross-engine review (Opus reviews Codex work via read-yourself; Codex reviews Claude work via `codex-exec.sh --model`). A **manual override** (`--impl codex|opus`) lets the user pin the implementer and have the *opposite* engine auto-assigned as reviewer, preserving the cross-engine rule.
+The reviewer table enforces cross-engine review (Opus reviews Codex work via read-yourself; Codex reviews Claude work via `codex-exec.sh --model`). A **manual override** (`--impl codex|opus|fable`) lets the user pin the implementer and have the *opposite* engine auto-assigned as reviewer, preserving the cross-engine rule. When no engine is pinned, the pipeline asks which one to use before implementing.
 
 ## 7. Design decisions & rationale
 
