@@ -8,6 +8,7 @@ For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For c
 
 ## Skills
 
+- **`/audit <dimension(s)> [area]`** — multi-engine consensus audit: run the *same* read-only analysis across ≥4 engines of different families (Claude-Sonnet, Claude-Opus, Grok, GPT-Codex), map consensus vs contrarian, **verify contrarian findings against the code**, and file severity-ranked issues. Consensus = confidence; a lone engine's contrarian catch (verified) is often the highest-value finding. Feeds `/pipeline` for the fix.
 - **`/pair-review [scope]`** — independent review of the current diff with the second engine. Structured findings, hard timeout (no zombies), and a mandatory fallback to reviewing it ourselves if the second engine does not respond.
 - **`/pipeline <description> [--impl codex|opus|fable]`** — a full phase: closed architect spec → decision-density-routed background implementer → cross-engine pair-review → finding-by-finding adjudication → verification → commit → promotion. `--impl` pins the implementer and auto-assigns the *opposite* engine as reviewer; if you don't pin one, the pipeline asks which engine should implement.
 - **`/promote [--yes] [title]`** — PR promotion: branch → PR to `dev` → merge → production gate → PR `dev`→`main` → merge → local sync.
