@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "engine": { "type": "string" },
+    "refuted": { "type": "boolean" },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "reason": { "type": "string" },
+    "evidence": { "type": ["string", "null"] }
+  },
+  "required": ["engine", "refuted", "confidence", "reason", "evidence"],
+  "additionalProperties": false
+}

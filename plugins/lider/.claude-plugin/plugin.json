@@ -1,5 +1,5 @@
 {
   "name": "lider",
-  "version": "0.3.0",
-  "description": "Lider: engine-agnostic workflow orchestrator - pair-review with a second engine (with fallback), phase pipeline, forge-agnostic PR promotion, plus the operating half: preflight conditions before touching shared state, and effect verification after. Skills: /pair-review, /preflight, /pipeline, /promote, /verify."
+  "version": "0.8.0",
+  "description": "Lider: engine-agnostic workflow orchestrator - a supervised runtime (heartbeat, command-aware watchdog, tree-kill, classified retry) that drives any engine CLI through a one-file adapter (claude, grok, calvoproxy, codex, or your own), pair-review with a second engine, phase pipeline, forge-agnostic PR promotion, plus the operating half: preflight conditions before touching shared state, and effect verification after. Skills: /pair-review, /preflight, /pipeline, /promote, /verify."
 }
