@@ -10,8 +10,8 @@
     {
       "name": "lider",
       "source": "./plugins/lider",
-      "description": "Lider: engine-agnostic workflow orchestrator (closed spec -> implementer -> pair-review with a second engine -> adjudication -> PR promotion).",
-      "version": "0.2.0"
+      "description": "Lider: engine-agnostic workflow orchestrator (preflight conditions -> closed spec -> implementer -> pair-review with a second engine -> adjudication -> PR promotion -> effect verification).",
+      "version": "0.3.0"
     }
   ]
 }
