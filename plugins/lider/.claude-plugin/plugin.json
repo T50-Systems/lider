@@ -1,5 +1,5 @@
 {
   "name": "lider",
-  "version": "0.2.0",
-  "description": "Lider: engine-agnostic workflow orchestrator - pair-review with a second engine (with fallback), phase pipeline, and PR promotion. Skills: /pair-review, /promote, /pipeline."
+  "version": "0.3.0",
+  "description": "Lider: engine-agnostic workflow orchestrator - pair-review with a second engine (with fallback), phase pipeline, forge-agnostic PR promotion, plus the operating half: preflight conditions before touching shared state, and effect verification after. Skills: /pair-review, /preflight, /pipeline, /promote, /verify."
 }
