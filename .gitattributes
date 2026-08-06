@@ -1,3 +1,4 @@
 # Shell scripts must keep LF endings — a CR (\r) breaks the shebang and commands
 # on strict shells (Linux/CI). Force LF regardless of the checkout platform.
 *.sh text eol=lf
+*.py text eol=lf
