@@ -6,6 +6,26 @@ argument-hint: "<phase or feature description> [--impl codex|opus|fable]"
 
 You act as the architect. Follow the flow in order; do not skip steps.
 
+## Standing rule for every step: "I could not check" is NOT "it is fine"
+
+Every check in this flow — yours, the implementer's, the reviewer's — has **three** outcomes,
+never two: `ok`, `not ok`, and **`could not determine`**. The third stops the flow. It does not
+pass it, and it is never rounded down to the second.
+
+This is not pedantry; it is the failure mode that gets *believed*. Measured in one session:
+a lock reader that could not launch its CLI returned empty and a dashboard drew **"all clear"
+while another session held the production deploy lock mid-deploy**; a reachability probe used
+an exit code that is also returned for "empty", so it would have failed open almost always; and
+a CI watcher read an API error as "not pending" and reported **"CI finished"**.
+
+Applied concretely: a verifier that answers "not present" when it actually failed to look is
+worse than no verifier. Prefer tools that reserve a distinct exit code (commonly `2`) for
+"I could not look", and treat that code as **stop**. When you write one, give it that code.
+
+**When the work touches production or a shared environment, run `preflight` before step 2 and
+`verify` after step 5.** `pipeline` establishes that you built the right thing; those two
+establish that you were allowed to ship it and that it actually arrived.
+
 ## Engine & model allocation
 
 Core idea: **Fable decides direction; Terra builds; Sol resolves uncertainty; Luna mechanizes; Opus and GPT-5.3-Codex review; Fable adjudicates.**
@@ -102,7 +122,7 @@ The GPT-5.3-Codex reviewer is realized by the Codex code-review path (model `cod
 
 4. **Adjudication.** Architect seat (Fable), against the spec — contracts, invariants, acceptance criteria, authorized risks, scope. For each finding, decide and record it: ACCEPT / accept with small fixes / return to the implementer / change the spec / reject and reimplement / escalate to human review. Do not adjudicate by "who seems right"; do not apply findings blindly.
 
-5. **Final verification.** Run the spec's verification commands YOURSELF with direct tools — do not rely on the implementer's report alone. If there is observable surface (UI/API), verify it for real.
+5. **Final verification.** Run the spec's verification commands YOURSELF with direct tools — do not rely on the implementer's report alone. If there is observable surface (UI/API), verify it for real. Apply the standing rule above: a command you could not run is not a command that passed.
 
 6. **Architect commit.** The implementer does NOT commit (the spec forbids it): after adjudicating and verifying, review `git status` and `git diff --stat` YOURSELF, and commit the result on the work branch with a conventional message. Nothing reaches `promote` without a deliberate commit from you.
 
