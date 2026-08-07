@@ -106,6 +106,26 @@ The first thing this caught, on its first real run: a review launched with `--mo
 was billed as `claude-sonnet-5` — reproducibly, at ~$0.27 for a two-line file. The session
 even reported `init.model: claude-haiku-4-5`; only the billed model exposed it.
 
+## Tests
+
+```bash
+python -m pytest -m "not slow"    # 92 tests, ~23s - run this on every change
+python -m pytest                  # + 14 supervision tests that drive real processes, ~96s
+```
+
+No engine is ever called: every test drives a fake engine that is a small Python
+script launched with `sys.executable`. The suite is free, deterministic, and clear of
+the shebang/WSL-bash trap that bit the real code twice.
+
+**Every test encodes a defect that actually happened**, or a rule the plugin refuses to
+break — a non-streaming engine killed for early silence, a payload fenced inside prose,
+our own notes landing in the engine's transcript, a grandchild outliving a teardown, an
+unknown cost recorded as zero. The suite is the memory of what went wrong, not decoration.
+
+Its first run found two live bugs in cost accounting: `grok.usage()` used a flat regex
+against a nested envelope, so **every Grok run had been silently recorded as
+cost-unmeasured**, and `claude.usage()` substring-matched compact JSON.
+
 ## Exit codes (both wrappers)
 
 | Code | Meaning | Retryable |
