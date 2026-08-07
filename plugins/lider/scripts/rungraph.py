@@ -139,6 +139,10 @@ FAMILIES = {
     "haiku": "anthropic", "fable": "anthropic",
     "grok": "xai",
     "calvoproxy": "openrouter",
+    # Runtime families (cross-engine rule is about the adapter/runtime, not the
+    # underlying model vendor — opencode/pi can host many model brands).
+    "opencode": "opencode",
+    "pi": "pi",
 }
 
 DECISIONS = ("accept", "fix", "return", "respec", "reject", "escalate")

@@ -23,7 +23,7 @@ aloud when the user skips it on a large feature.
 ## Harness root
 
 ```bash
-LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
 RG=(python "${LIDER}/scripts/rungraph.py")
 ```
 

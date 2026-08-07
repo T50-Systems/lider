@@ -25,7 +25,7 @@ How to check is still in **`/preflight`** and **`/verify`** — this skill is th
 ## Harness root
 
 ```bash
-LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
 RG=(python "${LIDER}/scripts/rungraph.py")
 ```
 
