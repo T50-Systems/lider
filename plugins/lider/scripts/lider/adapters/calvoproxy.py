@@ -15,6 +15,7 @@ from ..runtime import interpreter_for
 class CalvoProxyAdapter(Adapter):
     id = "calvoproxy"
     has_inflight = False      # one request either returns or does not
+    streams = False           # a single HTTP response: nothing arrives until it does
     native_schema = False     # weak free models: validate the result locally
 
     def locate(self):

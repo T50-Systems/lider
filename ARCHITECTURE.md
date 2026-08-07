@@ -103,6 +103,8 @@ The `activity` field is a human read of what the engine is doing *right now*, pa
 
 ### 4.2 Command-aware watchdog
 
+> Both watchdogs are adapter-disarmable, for the same reason at two moments. `has_inflight = False` disarms the **stall** watchdog (mid-run silence is unreadable); `streams = False` disarms the **startup** watchdog (early silence is unreadable). Measured: Grok writes nothing until it finishes, so an armed startup watchdog killed a real review at 129 s with an empty log. The hard timeout remains the bound in both cases, and `status.json` publishes `stall_watchdog` / `startup_watchdog` so an unwatched run is never mistaken for a watched one.
+
 The naive "abort if the log hasn't grown in N seconds" watchdog has a fatal flaw: a healthy engine running a long, silent shell command (a build, a test suite, a `sleep`) produces no output, so it looks identical to a hang and gets **falsely killed**.
 
 The fix distinguishes the two states by asking the adapter to read its engine's own markers (`exec` / `succeeded|failed|exited` for Codex; `tool_use` / `tool_result` events for Claude). While a command is **in flight**, the stall clock is suspended (silence is expected); the hard `timeout` remains the bound for a runaway command. A stall only fires when *the engine itself* is idle between steps - and an adapter with no in-flight grammar disarms the stall watchdog entirely rather than guess.

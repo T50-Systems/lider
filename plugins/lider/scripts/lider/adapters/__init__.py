@@ -35,8 +35,25 @@ class Adapter(object):
     has_inflight = False          # see the module docstring before setting this
     native_schema = False         # True when the engine enforces the schema itself
 
+    # Does the engine emit output PROGRESSIVELY, or all at once when it finishes?
+    #
+    # MEASURED: `grok --output-format json` emits a single object at the very end
+    # and writes nothing before it. The startup watchdog - which aborts a run whose
+    # log has not grown after `startup_s` - then stops being a health check and
+    # becomes a guarantee that any run longer than that window is killed. A real
+    # review died at 129s with exit 125 and log_bytes 0.
+    #
+    # None means "infer from has_inflight": an adapter that can parse a live stream
+    # is by definition an adapter whose engine produces one. Set it explicitly when
+    # the two differ.
+    streams = None
+
     def __init__(self):
         self.bin = None
+
+    def streams_output(self):
+        """Resolved answer to `streams`, with the has_inflight fallback applied."""
+        return self.has_inflight if self.streams is None else bool(self.streams)
 
     # -- discovery ---------------------------------------------------------
     def locate(self):

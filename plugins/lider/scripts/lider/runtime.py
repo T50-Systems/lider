@@ -148,6 +148,7 @@ class Status(object):
         self.tool = tool
         self.started_at = int(time.time())
         self.stall_armed = 0
+        self.startup_armed = 0
         self.usage = None
 
     def write(self, state, attempt=0, max_attempts=0, pid=None, elapsed=0, idle=0,
@@ -159,7 +160,8 @@ class Status(object):
             "attempt": attempt, "max_attempts": max_attempts, "pid": pid,
             "elapsed_s": elapsed, "idle_s": idle, "log_bytes": log_bytes,
             "exit": exit_code, "reason": reason, "activity": activity[:180],
-            "stall_watchdog": self.stall_armed, "usage": self.usage,
+            "stall_watchdog": self.stall_armed,
+            "startup_watchdog": self.startup_armed, "usage": self.usage,
             "started_at": self.started_at, "updated_at": int(time.time()),
         }
         directory = os.path.dirname(self.path) or "."
@@ -321,7 +323,10 @@ class Supervisor(object):
                     self._heartbeat(attempt, maxa, elapsed, idle, nbytes, shown)
                     last_hb = now
 
-                if not grew and elapsed >= startup_s:
+                # startup_s == 0 means the watchdog is disarmed: the adapter told us
+                # its engine emits nothing until it finishes, so "no output yet" is
+                # not evidence of death.
+                if startup_s > 0 and not grew and elapsed >= startup_s:
                     reason = "startup-failed"
                     break
                 # A stall is the engine being idle - NOT a shell command running,
@@ -397,12 +402,28 @@ class Supervisor(object):
         # rather than guessing. This is the plugin's own three-outcome rule applied
         # to its own supervision: "I cannot tell whether it is stalled" is not "it
         # is stalled", and killing a healthy 8-minute build is the worse error.
+        # MEASURED: `grok --output-format json` writes nothing until the run ends, so
+        # the startup watchdog stopped being a health check and became a guarantee
+        # that any run longer than its window was killed - a real review died at 129s
+        # with exit 125 and an empty log. Same rule as the stall watchdog, one step
+        # earlier: "I cannot tell whether it died" is not "it died". The hard timeout
+        # remains the bound in both cases.
+        if not self.adapter.streams_output() and startup_s > 0:
+            startup_s = 0
+            log.emit("runtime: adapter '%s' does not stream output - startup watchdog "
+                     "DISARMED (hard timeout %ss still applies)."
+                     % (self.adapter.id, timeout_s))
+        self.status.startup_armed = 1 if startup_s > 0 else 0
+
         if not self.adapter.has_inflight and stall_s > 0:
             stall_s = 0
-            with open(self.log_path, "a", encoding="utf-8") as fh:
-                fh.write("runtime: adapter '%s' reports no in-flight grammar - stall watchdog "
-                         "DISARMED (hard timeout %ss still applies).\n"
-                         % (self.adapter.id, timeout_s))
+            # Our channel, not <log>: that file is the engine's transcript, and a
+            # note of ours in it is read back as engine activity by the adapter's
+            # own tail reader. The durable record of both watchdogs is
+            # status.json, which a post-mortem should read instead.
+            log.emit("runtime: adapter '%s' reports no in-flight grammar - stall watchdog "
+                     "DISARMED (hard timeout %ss still applies)."
+                     % (self.adapter.id, timeout_s))
         self.status.stall_armed = 1 if stall_s > 0 else 0
 
         maxa = retries + 1

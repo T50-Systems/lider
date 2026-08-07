@@ -25,6 +25,8 @@ import sys
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
 FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+# The same block, but found anywhere inside surrounding prose.
+FENCE_ANY = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 # Keys an engine may hide the real payload behind, most specific first.
 ENVELOPE_KEYS = (
@@ -63,19 +65,43 @@ def balanced_objects(text):
 
 
 def parse_maybe(s):
-    """Parse a string that may be raw JSON or a fenced ```json block."""
+    """Recover JSON from a string an engine put its answer inside.
+
+    MEASURED: grok returns `{"text": "<prose> ```json {...} ``` "}` - the payload
+    is fenced, but the fence does not span the whole string. Matching only an
+    anchored fence made a chatty engine's answer unreachable and failed the run
+    with exit 3 even though the engine had answered correctly.
+
+    Three attempts, most specific first, so a fenced answer always beats an
+    object the engine merely quoted while reasoning:
+      1. the whole string is JSON, or a fence around it;
+      2. a fenced ```json block anywhere inside the prose - the LAST one, since
+         an engine that shows its work states its conclusion at the end;
+      3. the last balanced JSON object embedded anywhere in the string.
+    """
     if not isinstance(s, str):
         return None
-    m = FENCE.match(s)
-    if m:
-        s = m.group(1)
-    s = s.strip()
-    if not s.startswith(("{", "[")):
-        return None
-    try:
-        return json.loads(s)
-    except ValueError:
-        return None
+
+    match = FENCE.match(s)
+    body = match.group(1).strip() if match else s.strip()
+    if body.startswith(("{", "[")):
+        try:
+            return json.loads(body)
+        except ValueError:
+            pass
+
+    for fenced in reversed(FENCE_ANY.findall(s)):
+        try:
+            return json.loads(fenced.strip())
+        except ValueError:
+            continue
+
+    for span in reversed(list(balanced_objects(s))):
+        try:
+            return json.loads(span)
+        except ValueError:
+            continue
+    return None
 
 
 def unwrap(obj, depth=0):
