@@ -108,9 +108,17 @@ even reported `init.model: claude-haiku-4-5`; only the billed model exposed it.
 ## Tests
 
 ```bash
-python -m pytest -m "not slow"    # 175 tests, ~40s - run this on every change
-python -m pytest                  # + 14 supervision tests that drive real processes, ~3m
+python -m pytest -m "not slow"          # the fast suite - run this on every change
+python -m pytest                        # + the supervision tests, which drive real processes
+python -m pytest --cov                  # 91% - fails below 90, see .coveragerc
 ```
+
+Most tests call a CLI's `main()` **in process**. That is deliberate: `main()` is the
+boundary (only the `sys.exit` wrapper sits outside it), it is far faster than a
+subprocess per assertion, and coverage cannot see into a subprocess - so the CLI surface,
+which is most of this codebase, used to report 0% while being thoroughly exercised. A
+number that wrong is worse than no number. The supervisor and fan-out suites still spawn
+real processes, because there the process boundary *is* the thing under test.
 
 No engine is ever called: every test drives a fake engine that is a small Python
 script launched with `sys.executable`. The suite is free, deterministic, and clear of

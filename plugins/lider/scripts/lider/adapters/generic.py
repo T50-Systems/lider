@@ -40,6 +40,25 @@ class GenericAdapter(Adapter):
             return os.path.exists(out_path) and os.path.getsize(out_path) > 0
         return extract_to(log_path, out_path) == 0
 
+    @staticmethod
+    def split_args(raw):
+        """Split an argument string without destroying Windows paths.
+
+        MEASURED: `shlex.split` defaults to POSIX rules, where a backslash is an
+        escape character. `LIDER_ARGS_REVIEW=D:\\tools\\engine.py` therefore came
+        back as `D:toolsengine.py` and the run failed with "engine binary not
+        found". The generic adapter - the one whose entire job is to run whatever
+        CLI you point it at - was unusable on Windows with a native path, and no
+        test touched it.
+
+        posix=False keeps the backslashes but leaves quote characters attached to
+        the token, so they are stripped here.
+        """
+        if os.name != "nt":
+            return shlex.split(raw)
+        return [tok[1:-1] if len(tok) > 1 and tok[0] == tok[-1] and tok[0] in "\"'" else tok
+                for tok in shlex.split(raw, posix=False)]
+
     def argv(self, mode, model, prompt, schema, out):
         # A shebang is not enough on Windows: subprocess needs the interpreter.
         cmd = interpreter_for(self.bin) + [self.bin]
@@ -53,5 +72,5 @@ class GenericAdapter(Adapter):
         else:
             raise AdapterRefused("generic: unknown mode %r" % mode)
         if extra:
-            cmd += shlex.split(extra)
+            cmd += self.split_args(extra)
         return cmd + [prompt]

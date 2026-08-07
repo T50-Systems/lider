@@ -1008,14 +1008,18 @@ def cmd_show(args):
         print("units: %d, %d still open" % (len(state["units"]), len(pending)))
         for unit in state["units"]:
             blocked = unblocked(state, unit)
-            severe = len(open_severe(unit))
+            # NOT `severe`: that name holds the RUN's open findings a few lines up,
+            # and shadowing it with an int made `show` - the first thing a resumed
+            # session runs - crash with a TypeError on any run whose units had
+            # severe findings. Found by a coverage test, not by using it.
+            unit_severe = len(open_severe(unit))
             notes = []
             if blocked:
                 notes.append("blocked by " + ", ".join(blocked))
             if unit["rounds"]:
                 notes.append("%d round(s)" % len(unit["rounds"]))
-            if severe:
-                notes.append("%d open BLOCKER/MAJOR" % severe)
+            if unit_severe:
+                notes.append("%d open BLOCKER/MAJOR" % unit_severe)
             print("  %-14s %-11s %-24s %s" % (unit["id"], unit["node"],
                                               unit["title"][:24], "; ".join(notes)))
     if state["rounds"]:
