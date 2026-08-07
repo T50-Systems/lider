@@ -11,7 +11,7 @@
       "name": "lider",
       "source": "./plugins/lider",
       "description": "Lider multi-harness (Claude Code, Grok, OpenCode, Codex, Pi): inception/construction/operations, multi-engine adapters. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify.",
-      "version": "0.18.0"
+      "version": "0.19.0"
     }
   ]
 }

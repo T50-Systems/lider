@@ -80,21 +80,27 @@ INCEPTION_GRAPH = {
 }
 
 # Operations (optional separate run). Touch shared / deployed state: pin a target,
-# record preflight (ternary), act, prove effect, optional soak, close.
+# record preflight (ternary), act, prove effect, optional soak, close — plus a
+# checkable incident → rollback path when prove/soak fails.
 # Complements construction's promote→effect leg: use this when the action is not
-# "finish this feature ledger" but "may I touch prod / did it arrive".
+# "finish this feature ledger" but "may I touch prod / did it arrive / do we roll back".
 # RECOMMENDED before/after shared-state changes; STRICT requires preflight ok
-# before act and effect/prove ok before closed.
+# before act, effect/prove ok before closed, and an incident signal before incident.
 OPERATIONS_GRAPH = {
     "init":      ["scope"],
-    "scope":     ["preflight", "blocked"],
+    "scope":     ["preflight", "blocked", "incident"],
     "preflight": ["act", "blocked"],
-    "act":       ["prove", "blocked", "escalated"],
-    "prove":     ["soak", "closed", "act", "escalated"],
-    "soak":      ["closed", "act", "escalated"],
-    "blocked":   ["scope", "preflight"],
-    "escalated": ["scope", "closed"],
-    "closed":    [],
+    "act":       ["prove", "blocked", "escalated", "incident"],
+    "prove":     ["soak", "closed", "act", "escalated", "incident"],
+    "soak":      ["closed", "act", "escalated", "incident"],
+    # Incident is declared failure of effect/health — not a prose war room.
+    # rollback = revert toward previous_ref; act = forward fix (hot patch).
+    "incident":  ["rollback", "act", "escalated", "blocked"],
+    "rollback":  ["prove", "blocked", "escalated", "incident"],
+    "blocked":   ["scope", "preflight", "incident"],
+    "escalated": ["scope", "incident", "closed"],
+    # Post-close discovery: reopen as incident without inventing a new run.
+    "closed":    ["incident"],
 }
 
 KIND_CONSTRUCTION = "construction"
@@ -466,15 +472,17 @@ def cmd_init(args):
             print("inception: challenge is OPTIONAL (warns at sealed). "
                   "Strict mode requires it: init --strict or LIDER_STRICT=1.")
     elif kind == KIND_OPERATIONS:
-        print("operations: shared/deployed state - pin target, preflight, act, prove "
-              "effect, optional soak, close. Use /preflight and /verify for how to check.")
+        print("operations: pin target, preflight, act, prove, soak, close; "
+              "on failure: incident -> rollback|act -> prove. "
+              "Use /preflight and /verify for how to check.")
         print("operations: RECOMMENDED around deploys/merges to shared envs; not required "
               "for pure local work. Construction promote->effect remains for feature ship.")
         if strict:
-            print("STRICT: `check --name preflight --verdict ok` before act; "
-                  "`check --name effect|prove --verdict ok` before closed.")
+            print("STRICT: preflight ok before act; effect|prove ok before closed; "
+                  "incident needs not-ok|undetermined signal; rollback needs "
+                  "preflight|rollback-preflight ok + previous_ref.")
         else:
-            print("operations: preflight/effect checks OPTIONAL (warn if missing). "
+            print("operations: preflight/effect/incident checks OPTIONAL (warn if missing). "
                   "Strict: init --strict or LIDER_STRICT=1.")
     else:
         print("construction: a sealed inception handoff is RECOMMENDED "
@@ -500,18 +508,22 @@ def cmd_target(args):
         print("rungraph: target needs --env and --ref (e.g. --env prod --ref abc1234)",
               file=sys.stderr)
         return USAGE
+    prev = getattr(args, "previous_ref", None) or None
     state["target"] = {
         "env": args.env,
         "ref": args.ref,
+        "previous_ref": prev,
         "url": args.url or None,
         "surfaces": csv_ids(args.surfaces),
         "notes": args.notes or None,
         "construction_run": args.construction_run or None,
         "at": int(time.time()),
     }
-    commit(root, rid, state, "target", env=args.env, ref=args.ref)
-    print("target pinned: env=%s ref=%s%s%s"
+    commit(root, rid, state, "target", env=args.env, ref=args.ref,
+           previous_ref=prev)
+    print("target pinned: env=%s ref=%s%s%s%s"
           % (args.env, args.ref,
+             (" previous=%s" % prev) if prev else "",
              (" url=%s" % args.url) if args.url else "",
              (" surfaces=%s" % ",".join(state["target"]["surfaces"]))
              if state["target"]["surfaces"] else ""))
@@ -543,16 +555,77 @@ def check_ops_act(state, force):
     return OK, None
 
 
+def ops_incident_signal(state):
+    """A recorded failure or uncertainty — not a war-room narrative.
+
+    Accepts not-ok or undetermined on incident|effect|prove|health. ok alone is
+    not a signal to open an incident.
+    """
+    for name in ("incident", "effect", "prove", "health"):
+        chk = check_named(state, name)
+        if chk and chk.get("verdict") in ("not-ok", "undetermined"):
+            return True, name, chk.get("verdict")
+    return False, None, None
+
+
+def check_ops_incident(state, force):
+    """May we enter incident? Need a target; STRICT needs a ternary failure signal."""
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot open incident - no target pinned. "
+            "`target --env ... --ref ...` first.")
+    if is_strict(state):
+        ok, name, verdict = ops_incident_signal(state)
+        if not ok:
+            return REFUSED, (
+                "STRICT: cannot open incident without a recorded signal. "
+                "`check --name incident|effect|health --verdict not-ok|undetermined "
+                "--evidence ...` (what failed or could not be established), or --force.")
+    return OK, None
+
+
+def check_ops_rollback(state, force):
+    """May we roll back? Same spirit as act: preflight the revert.
+
+    STRICT prefers rollback-preflight, accepts preflight. Non-strict warns in enter.
+    previous_ref on target is RECOMMENDED so prove knows what 'good' is.
+    """
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot rollback - no target pinned.")
+    if is_strict(state):
+        if not check_verdict_ok(state, "rollback-preflight", "preflight"):
+            return REFUSED, (
+                "STRICT: cannot rollback without `check --name rollback-preflight` "
+                "(or preflight) --verdict ok --evidence ...`. Re-run /preflight for "
+                "the revert, or --force.")
+        if not (state.get("target") or {}).get("previous_ref"):
+            return REFUSED, (
+                "STRICT: cannot rollback without target.previous_ref (last known good). "
+                "`target --env ... --ref <bad> --previous-ref <good>`, or --force.")
+    return OK, None
+
+
 def check_ops_closed(state, force):
-    """May we close the ops run? Effect proof is RECOMMENDED; STRICT requires ok."""
+    """May we close the ops run? Effect proof is RECOMMENDED; STRICT requires ok.
+
+    After rollback, effect/prove must show the *recovered* state (usually previous_ref
+    is live) — same check names, new evidence line.
+    """
     if force:
         return OK, None
     if is_strict(state):
         if not check_verdict_ok(state, "effect", "prove"):
             return REFUSED, (
                 "STRICT: cannot close without `check --name effect` (or prove) "
-                "--verdict ok --evidence ...`. Run /verify against the live surface, "
-                "or --force.")
+                "--verdict ok --evidence ...`. Run /verify against the live surface "
+                "(post-rollback: prove previous_ref is what is served), or --force.")
+        # Do not close while an open incident signal still says not-ok without a
+        # later ok on effect — the ok above is sufficient if they re-checked effect.
     return OK, None
 
 
@@ -1196,30 +1269,32 @@ def evaluate_run(state, dest, force):
         foreign = set(GRAPH) | set(INCEPTION_GRAPH) | set(UNIT_GRAPH)
         if dest not in graph and dest in foreign:
             return REFUSED, (
-                "operations run cannot enter '%s' - use scope/preflight/act/prove/soak/closed. "
+                "operations run cannot enter '%s' - use "
+                "scope/preflight/act/prove/soak/incident/rollback/closed. "
                 "Feature build stays on a construction run." % dest)
         code, message = check_edge(graph, cur, dest, "", "node")
         if code != OK:
             return code, message
         if dest == "scope":
-            # Pinning target can happen before or at scope; require it to leave scope
-            # toward preflight, not to enter scope itself.
             return OK, None
         if dest == "preflight":
             return check_ops_scope(state, force)
         if dest == "act":
             return check_ops_act(state, force)
+        if dest == "incident":
+            return check_ops_incident(state, force)
+        if dest == "rollback":
+            return check_ops_rollback(state, force)
         if dest == "closed":
             return check_ops_closed(state, force)
-        # prove, soak, blocked, escalated: edge + optional global check blocks
+        # prove/soak: undetermined still blocks (could not look). not-ok does NOT —
+        # a failed effect is the signal to enter incident, not a stuck gate.
         if dest in ("prove", "soak") and not force:
-            bad, unknown = blocking_checks(state)
-            if bad:
-                return REFUSED, ("cannot enter '%s' - failing check(s): %s"
-                                 % (dest, ", ".join(bad)))
+            _bad, unknown = blocking_checks(state)
             if unknown:
                 return UNDETERMINED, (
-                    "cannot enter '%s' - check(s) UNDETERMINED: %s. Not a pass."
+                    "cannot enter '%s' - check(s) UNDETERMINED: %s. Not a pass. "
+                    "If the environment is broken, record not-ok and enter incident."
                     % (dest, ", ".join(unknown)))
         return OK, None
 
@@ -1322,8 +1397,7 @@ def cmd_enter(args):
               "inception, `enter sealed`, then `import --handoff .lider/handoffs/<id>.json`. "
               "Flat path is allowed; STRICT mode would refuse.", file=sys.stderr)
 
-    # Operations: warn (non-strict) when acting without a recorded preflight GO,
-    # or closing without an effect proof.
+    # Operations: warn (non-strict) when skipping recommended checks.
     if (not args.unit and state.get("kind") == KIND_OPERATIONS
             and not is_strict(state) and not args.force):
         if dest == "act" and not check_verdict_ok(state, "preflight"):
@@ -1334,6 +1408,20 @@ def cmd_enter(args):
             print("rungraph: WARNING: closing without `check --name effect|prove --verdict ok`. "
                   "RECOMMENDED: run /verify against the live surface. STRICT would refuse.",
                   file=sys.stderr)
+        if dest == "incident" and not ops_incident_signal(state)[0]:
+            print("rungraph: WARNING: opening incident without a recorded "
+                  "incident|effect|health not-ok|undetermined check. "
+                  "RECOMMENDED: record what failed. STRICT would refuse.",
+                  file=sys.stderr)
+        if dest == "rollback":
+            if not check_verdict_ok(state, "rollback-preflight", "preflight"):
+                print("rungraph: WARNING: rollback without rollback-preflight|preflight ok. "
+                      "RECOMMENDED: /preflight the revert. STRICT would refuse.",
+                      file=sys.stderr)
+            if not (state.get("target") or {}).get("previous_ref"):
+                print("rungraph: WARNING: rollback without target.previous_ref. "
+                      "RECOMMENDED: `target ... --previous-ref <good>`. STRICT would refuse.",
+                      file=sys.stderr)
 
     # One mutation path. scope_of(state, None) is the run itself, so the unit and
     # run cases differ only in what the event records and how the line reads.
@@ -1641,8 +1729,9 @@ def cmd_show(args):
         print("handoff out: %s (%s)" % (h.get("path"), (h.get("sha256") or "")[:12]))
     if state.get("target"):
         t = state["target"]
-        print("target: env=%s ref=%s%s%s"
+        print("target: env=%s ref=%s%s%s%s"
               % (t.get("env"), t.get("ref"),
+                 (" previous=%s" % t["previous_ref"]) if t.get("previous_ref") else "",
                  (" url=%s" % t["url"]) if t.get("url") else "",
                  (" surfaces=%s" % ",".join(t["surfaces"])) if t.get("surfaces") else ""))
         if t.get("construction_run"):
@@ -1757,7 +1846,9 @@ def build_parser():
 
     q = sub.add_parser("target", help="operations: pin env/ref under change")
     q.add_argument("--env", required=True, help="environment name (prod, staging, ...)")
-    q.add_argument("--ref", required=True, help="expected git SHA, tag, or release id")
+    q.add_argument("--ref", required=True, help="expected git SHA, tag, or release id (desired/current)")
+    q.add_argument("--previous-ref", dest="previous_ref",
+                   help="last known good ref (required for STRICT rollback)")
     q.add_argument("--url", help="base URL or health endpoint of the environment")
     q.add_argument("--surfaces", help="comma-separated surfaces to verify (api,web,...)")
     q.add_argument("--notes")

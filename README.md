@@ -11,7 +11,7 @@ For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For c
 - **`/inception <theme> [--strict]`** — **recommended** discovery run: frame, criteria, questions, units, optional challenge, seal to `.lider/handoffs/`. Strict: challenge at seal + handoff import before implement.
 - **`/pipeline <description> [--impl opus|sonnet|fable|grok]`** — construction: build spec → implement → cross-engine review → adjudicate → commit → promote. Prefer `/inception` first on non-trivial work.
 - **`/schedule [--max-width N]`** — plan **parallel unit waves** from deps (`rungraph schedule`); prints worktree commands. Does not run engines; use when multi-unit sequential feels too heavy.
-- **`/operate <action> [--strict]`** — **recommended** operations ledger for shared/deployed state: target → preflight → act → prove effect → close. How to check: `/preflight` + `/verify`. Strict: preflight ok before act, effect ok before close.
+- **`/operate <action> [--strict]`** — **recommended** operations ledger: target → preflight → act → prove → close, plus **incident → rollback** (or forward fix) when effect fails. How to check: `/preflight` + `/verify`.
 - **`/pair-review [scope]`** — independent review with the second engine family (fallback to host).
 - **`/promote [--yes] [title]`** — PR promotion (often the **act** inside `/operate`).
 - **`/preflight`**, **`/verify`** — establish conditions before shared-state changes; prove effect after.

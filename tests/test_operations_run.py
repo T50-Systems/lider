@@ -134,3 +134,76 @@ class TestOperationsBoundaries:
                    "--evidence", "could not read lock").returncode == UNDETERMINED
         ops("o", "enter", "preflight")
         assert ops("o", "enter", "act").returncode == REFUSED
+
+
+class TestIncidentRollback:
+    def _to_prove_failed(self, ops, strict=False):
+        args = ["init", "--title", "deploy", "--kind", "operations"]
+        if strict:
+            args.append("--strict")
+        ops("o", *args)
+        ops("o", "target", "--env", "prod", "--ref", "badsha",
+            "--previous-ref", "goodsha")
+        ops("o", "enter", "scope")
+        ops("o", "check", "--name", "preflight", "--verdict", "ok", "--evidence", "go")
+        ops("o", "enter", "preflight")
+        ops("o", "enter", "act")
+        ops("o", "check", "--name", "effect", "--verdict", "not-ok",
+            "--evidence", "5xx on /health")
+        # not-ok must not block entering prove (signal for incident)
+        assert ops("o", "enter", "prove").returncode == OK
+
+    def test_failed_effect_can_enter_incident(self, ops):
+        self._to_prove_failed(ops)
+        proc = ops("o", "enter", "incident")
+        assert proc.returncode == OK
+        assert state(ops, "o")["node"] == "incident"
+
+    def test_strict_incident_needs_signal(self, ops):
+        ops("o", "init", "--title", "x", "--kind", "operations", "--strict")
+        ops("o", "target", "--env", "prod", "--ref", "a", "--previous-ref", "b")
+        ops("o", "enter", "scope")
+        # jump-ish: no failure signal
+        ops("o", "check", "--name", "preflight", "--verdict", "ok", "--evidence", "go")
+        ops("o", "enter", "preflight")
+        ops("o", "enter", "act")
+        ops("o", "enter", "prove")
+        proc = ops("o", "enter", "incident")
+        assert proc.returncode == REFUSED
+        assert "STRICT" in proc.stderr
+
+    def test_strict_rollback_needs_previous_ref_and_preflight(self, ops):
+        ops("o", "init", "--title", "x", "--kind", "operations", "--strict")
+        ops("o", "target", "--env", "prod", "--ref", "bad")  # no previous_ref
+        ops("o", "enter", "scope")
+        ops("o", "check", "--name", "effect", "--verdict", "not-ok", "--evidence", "down")
+        ops("o", "enter", "incident")
+        proc = ops("o", "enter", "rollback")
+        assert proc.returncode == REFUSED
+
+    def test_rollback_then_prove_then_close(self, ops):
+        self._to_prove_failed(ops, strict=True)
+        assert ops("o", "enter", "incident").returncode == OK
+        ops("o", "check", "--name", "rollback-preflight", "--verdict", "ok",
+            "--evidence", "lock held for revert")
+        assert ops("o", "enter", "rollback").returncode == OK
+        # re-prove recovered state
+        ops("o", "check", "--name", "effect", "--verdict", "ok",
+            "--evidence", "prod serves goodsha")
+        assert ops("o", "enter", "prove").returncode == OK
+        assert ops("o", "enter", "closed").returncode == OK
+        assert state(ops, "o")["node"] == "closed"
+        assert state(ops, "o")["target"]["previous_ref"] == "goodsha"
+
+    def test_closed_can_reopen_incident(self, ops):
+        ops("o", "init", "--title", "x", "--kind", "operations")
+        ops("o", "target", "--env", "prod", "--ref", "a", "--previous-ref", "b")
+        ops("o", "enter", "scope")
+        ops("o", "enter", "preflight")
+        ops("o", "enter", "act")
+        ops("o", "check", "--name", "effect", "--verdict", "ok", "--evidence", "ok")
+        ops("o", "enter", "prove")
+        ops("o", "enter", "closed")
+        ops("o", "check", "--name", "health", "--verdict", "not-ok",
+            "--evidence", "error rate spike post-close")
+        assert ops("o", "enter", "incident").returncode == OK

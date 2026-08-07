@@ -166,6 +166,7 @@ class OpsTarget(BaseModel):
     model_config = STRICT
     env: str
     ref: str
+    previous_ref: Optional[str] = None  # last known good — rollback target
     url: Optional[str] = None
     surfaces: List[str] = []
     notes: Optional[str] = None
