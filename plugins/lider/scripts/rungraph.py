@@ -26,6 +26,12 @@ State lives in <repo>/.lider/runs/<run-id>/run.json, written atomically. It
 outlives the session that created it: a resumed orchestrator runs `show` and
 knows where it is, what the spec was, and what is still open.
 
+When to graph vs loop (do not invent a second framework):
+  - Retry/converge on one act → loop *inside* a node (adjudication rounds, fanout).
+  - Multi-role edges, barriers, resume across sessions → this graph.
+  - No checkable predicate → prose, not a new node.
+`show` lists artifact presence for the current kind so refusals are predictable.
+
 Exit codes:  0 ok  |  1 refused (a rule says no)  |  2 undetermined  |  3 usage
 """
 import argparse
@@ -1702,6 +1708,112 @@ def cmd_schedule(args):
     return OK
 
 
+def check_verdict(state, name):
+    """Latest verdict for a named check, or None if never recorded."""
+    chk = (state.get("checks") or {}).get(name)
+    return chk.get("verdict") if chk else None
+
+
+def artifact_lines(state):
+    """Human checklist: what checkable artifacts this run has / still needs.
+
+    Pure - no I/O. `show` prints this so a resumed session sees missing pins
+    before the next `enter` refusal. Not a second schema engine: only surfaces
+    facts the ledger already stores.
+    """
+    kind = state.get("kind", KIND_CONSTRUCTION)
+    node = state.get("node") or "init"
+    lines = []
+    strict = is_strict(state)
+
+    def row(ok, label, how):
+        lines.append(("%s  %s" % ("ok " if ok else " --", label), how if not ok else None))
+
+    if kind == KIND_INCEPTION:
+        row(bool(state.get("spec")), "frame pinned (spec --file)",
+            "pin discovery with `spec --file` before sealed")
+        n_crit = len(state.get("criteria") or [])
+        row(n_crit > 0, "acceptance criteria (%d)" % n_crit,
+            "`criterion add` — seal needs at least one")
+        open_q = open_questions(state)
+        row(not open_q, "questions closed (%d open)" % len(open_q),
+            "answer or assume with --answer")
+        miss = uncovered_criteria(state)
+        row(n_crit > 0 and not miss, "criteria covered by units",
+            "uncovered: %s" % ", ".join(c["id"] for c in miss) if miss else "`unit add --covers`")
+        challenged = "challenge" in (state.get("path") or [])
+        row(challenged, "challenge visited",
+            "optional; STRICT requires `enter challenge` before sealed")
+        sealed = bool(state.get("handoff_out")) or node == "sealed"
+        row(sealed, "handoff sealed (.lider/handoffs/)",
+            "`enter sealed` when the checklist is green")
+        return lines
+
+    if kind == KIND_OPERATIONS:
+        tgt = state.get("target")
+        row(bool(tgt), "target pinned (env + ref)",
+            "`target --env ... --ref ...` before scope/act")
+        if tgt:
+            row(bool(tgt.get("previous_ref")), "previous_ref (rollback target)",
+                "optional until rollback; STRICT rollback needs it")
+        pre = check_verdict(state, "preflight")
+        row(pre == "ok", "preflight check ok",
+            "record `check --name preflight --verdict ok` (STRICT before act)")
+        eff = check_verdict(state, "effect") or check_verdict(state, "prove")
+        row(eff == "ok", "effect/prove check ok",
+            "record `check --name effect|prove` (STRICT before closed)")
+        # Incident signal: not-ok/undetermined on effect/incident names
+        signal = False
+        for name, chk in (state.get("checks") or {}).items():
+            if name in ("effect", "prove", "incident", "soak") and chk.get("verdict") in (
+                    "not-ok", "undetermined"):
+                signal = True
+                break
+        if node in ("incident", "rollback") or "incident" in (state.get("path") or []):
+            row(signal or not strict, "incident signal (failure check)",
+                "STRICT: not-ok/undetermined on effect|incident before incident")
+        rb = check_verdict(state, "rollback-preflight")
+        if node == "rollback" or "rollback" in (state.get("path") or []):
+            row(rb == "ok" or not strict, "rollback-preflight ok",
+                "STRICT: `check --name rollback-preflight --verdict ok`")
+        return lines
+
+    # construction (default)
+    row(bool(state.get("spec")), "spec pinned (spec --file)",
+        "`spec --file` then `enter spec`")
+    row(bool(state.get("handoff")), "inception handoff imported",
+        "recommended; STRICT needs `import --handoff` before implement")
+    roles = state.get("roles") or {}
+    row("implementer" in roles, "implementer assigned",
+        "`assign --role implementer --engine ...` before implement")
+    row("reviewer" in roles, "reviewer assigned (other family)",
+        "`assign --role reviewer` — refused if same family as implementer")
+    findings = state.get("findings") or []
+    any_unit_findings = any((u.get("findings") or []) for u in (state.get("units") or []))
+    past_review = node in (
+        "adjudicate", "verify", "commit", "promote", "effect", "done", "escalated")
+    if findings or any_unit_findings or past_review:
+        row(bool(findings) or any_unit_findings, "findings ingested",
+            "`findings --file` after review — schema under plugins/lider/schemas/")
+        severe_open = list(open_severe(state))
+        for u in state.get("units") or []:
+            severe_open.extend(open_severe(u))
+        if findings or any_unit_findings:
+            row(not severe_open, "no undecided BLOCKER/MAJOR",
+                "adjudicate each, or they block verify/done")
+    n_crit = len(state.get("criteria") or [])
+    if n_crit or node in ("plan", "join") or state.get("units"):
+        miss = uncovered_criteria(state)
+        row(n_crit > 0 and not miss, "criteria covered by units (mapping only)",
+            "uncovered: %s" % ", ".join(c["id"] for c in miss) if miss
+            else "`criterion add` + `unit add --covers` before plan")
+    open_q = open_questions(state)
+    if open_q or state.get("questions"):
+        row(not open_q, "open questions resolved",
+            "%d open — answer or assume with --answer" % len(open_q))
+    return lines
+
+
 def cmd_show(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
     if args.json:
@@ -1736,6 +1848,14 @@ def cmd_show(args):
                  (" surfaces=%s" % ",".join(t["surfaces"])) if t.get("surfaces") else ""))
         if t.get("construction_run"):
             print("  from construction run: %s" % t["construction_run"])
+    # Artifact checklist — missing rows are what the next `enter` is likely to refuse.
+    arts = artifact_lines(state)
+    if arts:
+        print("artifacts:")
+        for label, hint in arts:
+            print("  %s" % label)
+            if hint:
+                print("       → %s" % hint)
     if state["roles"]:
         print("roles:")
         for role, info in state["roles"].items():

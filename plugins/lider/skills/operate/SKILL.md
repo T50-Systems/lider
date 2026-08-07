@@ -84,6 +84,20 @@ Forward fix instead of rollback: from `incident` use `enter act` (hot patch), th
 
 Reopen after close: `enter incident` from `closed` if discovery is late.
 
+## Artifacts (consume → produce)
+
+| Node | Consumes | Produces / pin |
+|---|---|---|
+| `scope` | `target` (env + ref) | scope entered |
+| `preflight` | target | `check --name preflight` ternary |
+| `act` | preflight ok (strict) | shared-state change |
+| `prove` / `soak` | live system | `check --name effect\|prove` |
+| `incident` | failure signal (not-ok / undetermined) | recovery path open |
+| `rollback` | `previous_ref` + rollback-preflight (strict) | revert; must **prove** again |
+| `closed` | effect ok (strict) | terminal (can reopen → incident) |
+
+`rungraph.py show` prints **artifacts:** for the same pins. Incident/rollback is **graph** (branching recovery); soak retries are a **loop** inside prove/soak — do not invent a war-room node for narrative RCA.
+
 ## Recommended vs strict
 
 | Gate | Default | Strict |

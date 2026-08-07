@@ -52,6 +52,19 @@ class TestInceptionSeal:
                     "--text", "user can log in").returncode == OK
         assert root(rid, "unit", "add", "--id", "auth", "--covers", "AC1").returncode == OK
 
+    def test_show_lists_inception_artifacts(self, root):
+        assert root("show-a", "init", "--title", "auth",
+                    "--kind", "inception").returncode == OK
+        out = root("show-a", "show").stdout
+        assert "artifacts:" in out
+        assert "frame pinned" in out
+        assert " --  frame pinned" in out
+
+        self._ready_to_seal(root, rid="show-b")
+        out = root("show-b", "show").stdout
+        assert "ok   frame pinned" in out or "ok  frame pinned" in out
+        assert "handoff sealed" in out
+
     def test_seal_writes_operational_handoff_under_lider(self, root):
         self._ready_to_seal(root)
         proc = root("inc", "enter", "sealed")
@@ -66,6 +79,8 @@ class TestInceptionSeal:
         Run.model_validate(st)
         assert st["node"] == "sealed"
         assert st["handoff_out"]["path"] == str(path)
+        show = root("inc", "show").stdout
+        assert "ok   handoff sealed" in show or "ok  handoff sealed" in show
 
     def test_seal_refuses_open_questions(self, root):
         self._ready_to_seal(root)

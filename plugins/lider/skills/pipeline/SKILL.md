@@ -154,6 +154,33 @@ orchestrator writes the criteria and declares which unit covers them, so the gat
 by never declaring a unit for it — a real and otherwise invisible error — and nothing more. Do
 not let a form check read as a substance check.
 
+### Loop vs graph — do not invent a second framework
+
+Lider is already **graph engineering** (durable ledger + legal edges). Keep the tiers straight:
+
+| Shape | When | Where it lives today |
+|---|---|---|
+| **Loop inside a node** | One act, bounded retry / converge | Adjudication rounds; fan-out `--until-dry` |
+| **Graph** | Multi-role edges, barriers (`join`), resume across sessions | `GRAPH` / units / inception / operations |
+| **Prose only** | No checkable predicate | Personas, design narrative — write it, do **not** add a node |
+
+Do **not** re-encode a loop as extra graph nodes, and do **not** port this ledger onto LangGraph (or similar). Change flow by editing the graph tables and guards in `rungraph.py`.
+
+### Artifact checklist (consume → produce)
+
+Guards already refuse missing pins. `rungraph.py show` prints an **artifacts:** block with the same facts. Construction (happy path):
+
+| Node / edge | Consumes | Produces / pin |
+|---|---|---|
+| `spec` | brief or imported handoff | spec file + hash (`spec --file`) |
+| `implement` | pinned spec, implementer assign, checks ok | working tree (no commit) |
+| `review` | diff + reviewer **other family** | findings JSON (`schemas/findings.schema.json`) |
+| `adjudicate` | findings | decisions + round; loop-back if not converging |
+| `verify` / `effect` | undecided-severe cleared | ternary `check` rows |
+| `plan` / `join` | criteria ↔ units mapping | unit subgraphs terminal before `join` |
+
+Inception and operations have their own tables in `/inception` and `/operate`. Coverage of criteria by units is **bookkeeping**, not proof of implementation.
+
 ### `next` and `schedule` — advisory, never authority
 
 `rungraph.py next` reports what is eligible **right now** and what blocks the rest.  

@@ -58,6 +58,17 @@ class TestOperationsHappyPath:
         ops("o", "enter", "scope")
         assert ops("o", "enter", "preflight").returncode == UNDETERMINED
 
+    def test_show_lists_operations_artifacts(self, ops):
+        ops("o", "init", "--title", "deploy", "--kind", "operations")
+        out = ops("o", "show").stdout
+        assert "artifacts:" in out
+        assert "target pinned" in out
+        ops("o", "target", "--env", "prod", "--ref", "abc1234", "--previous-ref", "old")
+        ops("o", "check", "--name", "preflight", "--verdict", "ok", "--evidence", "go")
+        out = ops("o", "show").stdout
+        assert "ok   target pinned" in out or "ok  target pinned" in out
+        assert "preflight check ok" in out
+
 
 class TestOperationsStrict:
     def test_strict_blocks_act_without_preflight_ok(self, ops):
