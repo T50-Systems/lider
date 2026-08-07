@@ -113,6 +113,9 @@ python "${LIDER}/scripts/rungraph.py" <command> [--run <id>]
 | `unit add --id X --covers AC1,AC3 [--depends-on Y]` | step 1, once the spec is split |
 | `next` | **read-only** — what could run right now, and how wide the concurrency is |
 | `show` | **first thing to run when resuming** — node, spec text, roles, criteria, questions, units, open findings |
+| `snapshot` | **G4 audit** — structure (edges/node) vs content pins (spec hash, roles); `--json` / `--out` |
+| `template --role …` | **G2 content** — role prompts under `templates/roles/` (not graph edges) |
+| `extract` / `apply-plan` | session log → plan → seed ledger (still seal separately) |
 
 Nodes: `spec → challenge? → preflight? → implement → review → adjudicate → verify → commit →
 promote → effect → done`, plus the loop-backs `adjudicate → implement` / `adjudicate → spec`
@@ -158,6 +161,30 @@ orchestrator writes the criteria and declares which unit covers them, so the gat
 by never declaring a unit for it — a real and otherwise invisible error — and nothing more. Do
 not let a form check read as a substance check.
 
+### Prompt graph engineering (G1–G4) — design checklist
+
+Full note: `docs/PGE.md`. Before adding a node, skill step, or “smart” agent hop, answer:
+
+1. **Node or loop?** Retry/converge on one act → loop *inside* a node. Multi-role / barrier / resume → graph edge.
+2. **Structure or content?** Edges/guards in `lider/rungraph/`; role wording in `templates/roles/*.md` (G2).
+3. **Artifact or transcript?** Must outlive the session → ledger pin / handoff / plan / findings. Else prose only.
+4. **Explicit or emergent?** Next step needs `enter` / `assign`. “The model chooses the flow without the ledger” is a **regression**.
+
+| Condition | Lider meaning |
+|---|---|
+| **G1** Explicit structure | Graph tables + `enter`/`gate` |
+| **G2** Structure ≠ content | Templates + pinned specs; not edges in SKILL prose alone |
+| **G3** Executable semantics | **Ledger-as-arbiter** (who may enter / what blocks) — **not** auto-launch engines. `schedule` stays advisory. |
+| **G4** First-class artifact | `run.json`, handoffs, plans; `rungraph snapshot` for audit |
+
+```bash
+python "${LIDER}/scripts/rungraph.py" snapshot --json
+python "${LIDER}/scripts/rungraph.py" template --role implementer
+python "${LIDER}/scripts/rungraph.py" template --list
+```
+
+**Prose guides; ledger decides.** Skills load role templates for wording; they never skip `enter`.
+
 ### Loop vs graph — do not invent a second framework
 
 Lider is already **graph engineering** (durable ledger + legal edges). Keep the tiers straight:
@@ -168,7 +195,7 @@ Lider is already **graph engineering** (durable ledger + legal edges). Keep the 
 | **Graph** | Multi-role edges, barriers (`join`), resume across sessions | `GRAPH` / units / inception / operations |
 | **Prose only** | No checkable predicate | Personas, design narrative — write it, do **not** add a node |
 
-Do **not** re-encode a loop as extra graph nodes, and do **not** port this ledger onto LangGraph (or similar). Change flow by editing the graph tables and guards in `rungraph.py`.
+Do **not** re-encode a loop as extra graph nodes, and do **not** port this ledger onto LangGraph (or similar). Change flow by editing the graph tables and guards in `rungraph` (not by inventing free-form multi-agent control).
 
 ### Artifact checklist (consume → produce)
 
@@ -416,11 +443,11 @@ Every step below ends with the corresponding `enter <node>`; if it refuses, that
 
    Classify risk. For high-risk features only, run **step 1B** — have GPT-5.6 Sol pressure-test the plan (see allocation) before implementing.
 
-2. **Implementer.** Record the engine (`rungraph.py assign --role implementer --engine <e> --model <m>`) and `enter implement` BEFORE launching — the guard refuses if a preflight check is failing or undetermined. If the user pinned an implementer (`--impl opus|sonnet|fable|grok`), use it per *Manual engine override*. If they did NOT pin one, **ask which model implements** (opus / sonnet / fable) per that section before launching — unless the request already makes it unambiguous, in which case route by decision density (Haiku mechanical / Sonnet default / Opus open decisions). Launch in the background with the full spec. The implementer does not decide architecture and does NOT commit; it reports deviations with a reason.
+2. **Implementer.** Record the engine (`rungraph.py assign --role implementer --engine <e> --model <m>`) and `enter implement` BEFORE launching — the guard refuses if a preflight check is failing or undetermined. Load role content from **`templates/roles/implementer.md`** (`rungraph template --role implementer`) plus the pinned spec — do not invent a second control flow. If the user pinned an implementer (`--impl opus|sonnet|fable|grok`), use it per *Manual engine override*. If they did NOT pin one, **ask which model implements** (opus / sonnet / fable) per that section before launching — unless the request already makes it unambiguous, in which case route by decision density (Haiku mechanical / Sonnet default / Opus open decisions). Launch in the background with the full spec. The implementer does not decide architecture and does NOT commit; it reports deviations with a reason.
 
    **Background visibility rule (see *VISIBILITY IS MANDATORY* above — enforce it).** EVERY background task in this flow must stream visible output as it runs, never only on exit. For the implementer, that means launching `agent-implement.py` directly so its heartbeat streams — NOT wrapping it in a run-then-`cat`-the-log command, and NOT pairing it with a blind `Start-Sleep <minutes>` anti-hang (the wrapper's watchdog already covers hangs). Any other background loop (QA servers, status pollers) must print one line per short iteration with timestamp/phase/elapsed. A mute task is indistinguishable from a hang.
 
-3. **Pair-review.** `assign --role reviewer --engine <e>` first: a same-family reviewer is refused there, before the tokens are spent, not after. Then `enter review`, and feed the result in with `findings --file <out.json>`. When the implementer finishes, review the resulting diff (the uncommitted working tree; if the implementer worked on a branch, that branch's diff against `origin/dev`) with an engine **different from the implementer**. If an implementer was pinned, the reviewer is the other family per the override table (**any Claude model → Grok** via `agent-exec.py --engine grok`; **Grok → Opus**, reviewed by you). For anything beyond a routine ticket prefer the fan-out over a single reviewer.
+3. **Pair-review.** `assign --role reviewer --engine <e>` first: a same-family reviewer is refused there, before the tokens are spent, not after. Then `enter review`. Base the review prompt on **`templates/roles/reviewer.md`**, and feed the result in with `findings --file <out.json>`. When the implementer finishes, review the resulting diff (the uncommitted working tree; if the implementer worked on a branch, that branch's diff against `origin/dev`) with an engine **different from the implementer**. If an implementer was pinned, the reviewer is the other family per the override table (**any Claude model → Grok** via `agent-exec.py --engine grok`; **Grok → Opus**, reviewed by you). For anything beyond a routine ticket prefer the fan-out over a single reviewer.
 
 4. **Adjudication.** `enter adjudicate`, then one `adjudicate --finding <id> --decision <d> --rationale "..."` per finding — the decision log is the ledger, not your message. Returning to the implementer is `enter implement`, which enforces the round cap and the convergence rule; if it refuses, `enter escalated`. Architect seat (Fable), against the spec — contracts, invariants, acceptance criteria, authorized risks, scope. For each finding, decide and record it: ACCEPT / accept with small fixes / return to the implementer / change the spec / reject and reimplement / escalate to human review. Do not adjudicate by "who seems right"; do not apply findings blindly.
 

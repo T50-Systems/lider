@@ -58,6 +58,7 @@ Coverage is a **mapping** check (criteria ↔ units), not proof the design is go
 Say that when you report.
 
 4. **Challenge (optional by default):** other-family pressure test for high-risk work.
+   Prompt content: `rungraph template --role challenger` (G2 — wording, not a new edge).
 
 ```bash
 "${RG[@]}" assign --role challenger --engine grok --run <id>   # example

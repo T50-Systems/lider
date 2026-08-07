@@ -25,6 +25,8 @@ from .constants import (
 )
 from .schedule import cmd_next, cmd_schedule
 from .show import cmd_show
+from .snapshot import cmd_snapshot
+from .templates_cmd import cmd_template
 
 DOC_HEAD = "rungraph.py - the run ledger: Lider's flow as an enforced state machine."
 
@@ -208,6 +210,23 @@ def build_parser():
     q.add_argument("--enter-spec", action="store_true")
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_apply_plan)
+
+    q = sub.add_parser(
+        "snapshot",
+        help="G4 audit blob: structure (edges/node) vs content pins (spec/roles)")
+    q.add_argument("--json", action="store_true")
+    q.add_argument("--out", help="write JSON to this path")
+    q.set_defaults(fn=cmd_snapshot)
+
+    q = sub.add_parser(
+        "template",
+        help="G2 role prompt templates (content only; structure is the graph tables)")
+    q.add_argument("--role", choices=["architect", "implementer", "reviewer", "challenger"],
+                   help="print this role's template body")
+    q.add_argument("--list", action="store_true", help="list roles and paths")
+    q.add_argument("--path", dest="path_only", action="store_true",
+                   help="print filesystem path only")
+    q.set_defaults(fn=cmd_template)
     return p
 
 
