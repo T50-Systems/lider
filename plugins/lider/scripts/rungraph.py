@@ -26,6 +26,12 @@ State lives in <repo>/.lider/runs/<run-id>/run.json, written atomically. It
 outlives the session that created it: a resumed orchestrator runs `show` and
 knows where it is, what the spec was, and what is still open.
 
+When to graph vs loop (do not invent a second framework):
+  - Retry/converge on one act → loop *inside* a node (adjudication rounds, fanout).
+  - Multi-role edges, barriers, resume across sessions → this graph.
+  - No checkable predicate → prose, not a new node.
+`show` lists artifact presence for the current kind so refusals are predictable.
+
 Exit codes:  0 ok  |  1 refused (a rule says no)  |  2 undetermined  |  3 usage
 """
 import argparse
@@ -80,21 +86,27 @@ INCEPTION_GRAPH = {
 }
 
 # Operations (optional separate run). Touch shared / deployed state: pin a target,
-# record preflight (ternary), act, prove effect, optional soak, close.
+# record preflight (ternary), act, prove effect, optional soak, close — plus a
+# checkable incident → rollback path when prove/soak fails.
 # Complements construction's promote→effect leg: use this when the action is not
-# "finish this feature ledger" but "may I touch prod / did it arrive".
+# "finish this feature ledger" but "may I touch prod / did it arrive / do we roll back".
 # RECOMMENDED before/after shared-state changes; STRICT requires preflight ok
-# before act and effect/prove ok before closed.
+# before act, effect/prove ok before closed, and an incident signal before incident.
 OPERATIONS_GRAPH = {
     "init":      ["scope"],
-    "scope":     ["preflight", "blocked"],
+    "scope":     ["preflight", "blocked", "incident"],
     "preflight": ["act", "blocked"],
-    "act":       ["prove", "blocked", "escalated"],
-    "prove":     ["soak", "closed", "act", "escalated"],
-    "soak":      ["closed", "act", "escalated"],
-    "blocked":   ["scope", "preflight"],
-    "escalated": ["scope", "closed"],
-    "closed":    [],
+    "act":       ["prove", "blocked", "escalated", "incident"],
+    "prove":     ["soak", "closed", "act", "escalated", "incident"],
+    "soak":      ["closed", "act", "escalated", "incident"],
+    # Incident is declared failure of effect/health — not a prose war room.
+    # rollback = revert toward previous_ref; act = forward fix (hot patch).
+    "incident":  ["rollback", "act", "escalated", "blocked"],
+    "rollback":  ["prove", "blocked", "escalated", "incident"],
+    "blocked":   ["scope", "preflight", "incident"],
+    "escalated": ["scope", "incident", "closed"],
+    # Post-close discovery: reopen as incident without inventing a new run.
+    "closed":    ["incident"],
 }
 
 KIND_CONSTRUCTION = "construction"
@@ -139,6 +151,10 @@ FAMILIES = {
     "haiku": "anthropic", "fable": "anthropic",
     "grok": "xai",
     "calvoproxy": "openrouter",
+    # Runtime families (cross-engine rule is about the adapter/runtime, not the
+    # underlying model vendor — opencode/pi can host many model brands).
+    "opencode": "opencode",
+    "pi": "pi",
 }
 
 DECISIONS = ("accept", "fix", "return", "respec", "reject", "escalate")
@@ -462,15 +478,17 @@ def cmd_init(args):
             print("inception: challenge is OPTIONAL (warns at sealed). "
                   "Strict mode requires it: init --strict or LIDER_STRICT=1.")
     elif kind == KIND_OPERATIONS:
-        print("operations: shared/deployed state - pin target, preflight, act, prove "
-              "effect, optional soak, close. Use /preflight and /verify for how to check.")
+        print("operations: pin target, preflight, act, prove, soak, close; "
+              "on failure: incident -> rollback|act -> prove. "
+              "Use /preflight and /verify for how to check.")
         print("operations: RECOMMENDED around deploys/merges to shared envs; not required "
               "for pure local work. Construction promote->effect remains for feature ship.")
         if strict:
-            print("STRICT: `check --name preflight --verdict ok` before act; "
-                  "`check --name effect|prove --verdict ok` before closed.")
+            print("STRICT: preflight ok before act; effect|prove ok before closed; "
+                  "incident needs not-ok|undetermined signal; rollback needs "
+                  "preflight|rollback-preflight ok + previous_ref.")
         else:
-            print("operations: preflight/effect checks OPTIONAL (warn if missing). "
+            print("operations: preflight/effect/incident checks OPTIONAL (warn if missing). "
                   "Strict: init --strict or LIDER_STRICT=1.")
     else:
         print("construction: a sealed inception handoff is RECOMMENDED "
@@ -496,18 +514,22 @@ def cmd_target(args):
         print("rungraph: target needs --env and --ref (e.g. --env prod --ref abc1234)",
               file=sys.stderr)
         return USAGE
+    prev = getattr(args, "previous_ref", None) or None
     state["target"] = {
         "env": args.env,
         "ref": args.ref,
+        "previous_ref": prev,
         "url": args.url or None,
         "surfaces": csv_ids(args.surfaces),
         "notes": args.notes or None,
         "construction_run": args.construction_run or None,
         "at": int(time.time()),
     }
-    commit(root, rid, state, "target", env=args.env, ref=args.ref)
-    print("target pinned: env=%s ref=%s%s%s"
+    commit(root, rid, state, "target", env=args.env, ref=args.ref,
+           previous_ref=prev)
+    print("target pinned: env=%s ref=%s%s%s%s"
           % (args.env, args.ref,
+             (" previous=%s" % prev) if prev else "",
              (" url=%s" % args.url) if args.url else "",
              (" surfaces=%s" % ",".join(state["target"]["surfaces"]))
              if state["target"]["surfaces"] else ""))
@@ -539,16 +561,77 @@ def check_ops_act(state, force):
     return OK, None
 
 
+def ops_incident_signal(state):
+    """A recorded failure or uncertainty — not a war-room narrative.
+
+    Accepts not-ok or undetermined on incident|effect|prove|health. ok alone is
+    not a signal to open an incident.
+    """
+    for name in ("incident", "effect", "prove", "health"):
+        chk = check_named(state, name)
+        if chk and chk.get("verdict") in ("not-ok", "undetermined"):
+            return True, name, chk.get("verdict")
+    return False, None, None
+
+
+def check_ops_incident(state, force):
+    """May we enter incident? Need a target; STRICT needs a ternary failure signal."""
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot open incident - no target pinned. "
+            "`target --env ... --ref ...` first.")
+    if is_strict(state):
+        ok, name, verdict = ops_incident_signal(state)
+        if not ok:
+            return REFUSED, (
+                "STRICT: cannot open incident without a recorded signal. "
+                "`check --name incident|effect|health --verdict not-ok|undetermined "
+                "--evidence ...` (what failed or could not be established), or --force.")
+    return OK, None
+
+
+def check_ops_rollback(state, force):
+    """May we roll back? Same spirit as act: preflight the revert.
+
+    STRICT prefers rollback-preflight, accepts preflight. Non-strict warns in enter.
+    previous_ref on target is RECOMMENDED so prove knows what 'good' is.
+    """
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot rollback - no target pinned.")
+    if is_strict(state):
+        if not check_verdict_ok(state, "rollback-preflight", "preflight"):
+            return REFUSED, (
+                "STRICT: cannot rollback without `check --name rollback-preflight` "
+                "(or preflight) --verdict ok --evidence ...`. Re-run /preflight for "
+                "the revert, or --force.")
+        if not (state.get("target") or {}).get("previous_ref"):
+            return REFUSED, (
+                "STRICT: cannot rollback without target.previous_ref (last known good). "
+                "`target --env ... --ref <bad> --previous-ref <good>`, or --force.")
+    return OK, None
+
+
 def check_ops_closed(state, force):
-    """May we close the ops run? Effect proof is RECOMMENDED; STRICT requires ok."""
+    """May we close the ops run? Effect proof is RECOMMENDED; STRICT requires ok.
+
+    After rollback, effect/prove must show the *recovered* state (usually previous_ref
+    is live) — same check names, new evidence line.
+    """
     if force:
         return OK, None
     if is_strict(state):
         if not check_verdict_ok(state, "effect", "prove"):
             return REFUSED, (
                 "STRICT: cannot close without `check --name effect` (or prove) "
-                "--verdict ok --evidence ...`. Run /verify against the live surface, "
-                "or --force.")
+                "--verdict ok --evidence ...`. Run /verify against the live surface "
+                "(post-rollback: prove previous_ref is what is served), or --force.")
+        # Do not close while an open incident signal still says not-ok without a
+        # later ok on effect — the ok above is sufficient if they re-checked effect.
     return OK, None
 
 
@@ -1192,30 +1275,32 @@ def evaluate_run(state, dest, force):
         foreign = set(GRAPH) | set(INCEPTION_GRAPH) | set(UNIT_GRAPH)
         if dest not in graph and dest in foreign:
             return REFUSED, (
-                "operations run cannot enter '%s' - use scope/preflight/act/prove/soak/closed. "
+                "operations run cannot enter '%s' - use "
+                "scope/preflight/act/prove/soak/incident/rollback/closed. "
                 "Feature build stays on a construction run." % dest)
         code, message = check_edge(graph, cur, dest, "", "node")
         if code != OK:
             return code, message
         if dest == "scope":
-            # Pinning target can happen before or at scope; require it to leave scope
-            # toward preflight, not to enter scope itself.
             return OK, None
         if dest == "preflight":
             return check_ops_scope(state, force)
         if dest == "act":
             return check_ops_act(state, force)
+        if dest == "incident":
+            return check_ops_incident(state, force)
+        if dest == "rollback":
+            return check_ops_rollback(state, force)
         if dest == "closed":
             return check_ops_closed(state, force)
-        # prove, soak, blocked, escalated: edge + optional global check blocks
+        # prove/soak: undetermined still blocks (could not look). not-ok does NOT —
+        # a failed effect is the signal to enter incident, not a stuck gate.
         if dest in ("prove", "soak") and not force:
-            bad, unknown = blocking_checks(state)
-            if bad:
-                return REFUSED, ("cannot enter '%s' - failing check(s): %s"
-                                 % (dest, ", ".join(bad)))
+            _bad, unknown = blocking_checks(state)
             if unknown:
                 return UNDETERMINED, (
-                    "cannot enter '%s' - check(s) UNDETERMINED: %s. Not a pass."
+                    "cannot enter '%s' - check(s) UNDETERMINED: %s. Not a pass. "
+                    "If the environment is broken, record not-ok and enter incident."
                     % (dest, ", ".join(unknown)))
         return OK, None
 
@@ -1318,8 +1403,7 @@ def cmd_enter(args):
               "inception, `enter sealed`, then `import --handoff .lider/handoffs/<id>.json`. "
               "Flat path is allowed; STRICT mode would refuse.", file=sys.stderr)
 
-    # Operations: warn (non-strict) when acting without a recorded preflight GO,
-    # or closing without an effect proof.
+    # Operations: warn (non-strict) when skipping recommended checks.
     if (not args.unit and state.get("kind") == KIND_OPERATIONS
             and not is_strict(state) and not args.force):
         if dest == "act" and not check_verdict_ok(state, "preflight"):
@@ -1330,6 +1414,20 @@ def cmd_enter(args):
             print("rungraph: WARNING: closing without `check --name effect|prove --verdict ok`. "
                   "RECOMMENDED: run /verify against the live surface. STRICT would refuse.",
                   file=sys.stderr)
+        if dest == "incident" and not ops_incident_signal(state)[0]:
+            print("rungraph: WARNING: opening incident without a recorded "
+                  "incident|effect|health not-ok|undetermined check. "
+                  "RECOMMENDED: record what failed. STRICT would refuse.",
+                  file=sys.stderr)
+        if dest == "rollback":
+            if not check_verdict_ok(state, "rollback-preflight", "preflight"):
+                print("rungraph: WARNING: rollback without rollback-preflight|preflight ok. "
+                      "RECOMMENDED: /preflight the revert. STRICT would refuse.",
+                      file=sys.stderr)
+            if not (state.get("target") or {}).get("previous_ref"):
+                print("rungraph: WARNING: rollback without target.previous_ref. "
+                      "RECOMMENDED: `target ... --previous-ref <good>`. STRICT would refuse.",
+                      file=sys.stderr)
 
     # One mutation path. scope_of(state, None) is the run itself, so the unit and
     # run cases differ only in what the event records and how the line reads.
@@ -1429,6 +1527,293 @@ def cmd_next(args):
     return OK
 
 
+def unit_ready_now(state, unit):
+    """True when this unit may start implement under the live ledger (not simulated)."""
+    if unit.get("node") != "pending":
+        return False
+    if unblocked(state, unit):
+        return False
+    return evaluate_unit(state, unit, "implement", False)[0] == OK
+
+
+def compute_schedule(state, max_width=None):
+    """Waves of units that can proceed in parallel, given dependency edges.
+
+    Does NOT run engines. Wave 0 is what is READY right now (same as `next`).
+    Later waves assume earlier waves finish (their ids join the done set) so you
+    get a full plan without pretending the ledger advanced.
+
+    Units already mid-flight (implement/review/adjudicate/...) are listed as
+    in_flight, not re-scheduled. Cycles or missing deps surface as stuck.
+    """
+    all_ids = {u["id"] for u in state.get("units", [])}
+    finished = {u["id"] for u in state.get("units", []) if u["node"] in UNIT_TERMINAL}
+    in_flight = [u for u in state.get("units", [])
+                 if u["node"] not in UNIT_TERMINAL and u["node"] != "pending"]
+    pending = [u for u in state.get("units", []) if u["node"] == "pending"]
+
+    simulated_done = set(finished)
+    remaining = {u["id"]: u for u in pending}
+    waves = []
+    stuck = []
+    guard = 0
+    while remaining and guard < len(all_ids) + 2:
+        guard += 1
+        ready_ids = []
+        for uid, unit in remaining.items():
+            deps = unit.get("depends_on") or []
+            unknown = [d for d in deps if d not in all_ids]
+            unmet = [d for d in deps if d not in simulated_done]
+            if unknown:
+                continue
+            if not unmet:
+                # Live prereqs (open questions, checks) only gate wave 0.
+                if not waves and not unit_ready_now(state, unit):
+                    continue
+                ready_ids.append(uid)
+        if not ready_ids:
+            stuck = list(remaining.values())
+            break
+        ready_ids.sort()
+        if max_width and max_width > 0:
+            chosen = ready_ids[:max_width]
+        else:
+            chosen = ready_ids
+        wave_units = [remaining[i] for i in chosen]
+        waves.append([{
+            "id": u["id"],
+            "title": u.get("title", ""),
+            "depends_on": list(u.get("depends_on") or []),
+            "covers": list(u.get("covers") or []),
+            "node": u["node"],
+        } for u in wave_units])
+        for uid in chosen:
+            simulated_done.add(uid)
+            del remaining[uid]
+
+    return {
+        "waves": waves,
+        "wave_count": len(waves),
+        "width_now": len(waves[0]) if waves else 0,
+        "max_wave_width": max((len(w) for w in waves), default=0),
+        "in_flight": [{"id": u["id"], "node": u["node"], "title": u.get("title", "")}
+                      for u in in_flight],
+        "stuck": [{"id": u["id"], "depends_on": list(u.get("depends_on") or []),
+                   "blocked_by": unblocked(state, u)} for u in stuck],
+        "finished": sorted(finished),
+    }
+
+
+def schedule_commands(rid, plan, root, worktree_root=None):
+    """Shell lines a human (or host agent) can run. One worktree per unit in a wave."""
+    lines = []
+    lines.append("# Lider schedule for run %s — ledger is still the arbiter;" % rid)
+    lines.append("# these commands do NOT auto-run engines. Parallel = one worktree per unit.")
+    base = worktree_root or os.path.join(root, ".lider", "worktrees", rid)
+    lines.append("mkdir -p %s 2>/dev/null || mkdir %s 2>nul" % (base, base))
+    for i, wave in enumerate(plan["waves"]):
+        lines.append("")
+        lines.append("# --- wave %d (%d unit(s) in parallel) ---" % (i, len(wave)))
+        for u in wave:
+            wt = os.path.join(base, u["id"])
+            branch = "unit/%s-%s" % (rid, u["id"])
+            lines.append("## unit %s: %s" % (u["id"], u.get("title") or ""))
+            lines.append("git worktree add \"%s\" -b %s HEAD 2>/dev/null || git worktree add \"%s\" %s"
+                         % (wt, branch, wt, branch))
+            lines.append(
+                "python \"$LIDER/scripts/rungraph.py\" --dir \"%s\" --run %s "
+                "enter implement --unit %s"
+                % (root, rid, u["id"]))
+            lines.append(
+                "# then in %s: agent-implement / host implementer for this unit only"
+                % wt)
+        if i + 1 < len(plan["waves"]):
+            lines.append("# wait for wave %d to reach unit done, then continue" % i)
+    if plan.get("in_flight"):
+        lines.append("")
+        lines.append("# already in flight (do not re-schedule):")
+        for u in plan["in_flight"]:
+            lines.append("#   %s @ %s" % (u["id"], u["node"]))
+    if plan.get("stuck"):
+        lines.append("")
+        lines.append("# STUCK (deps unfinished or unknown) — fix mapping before scheduling:")
+        for u in plan["stuck"]:
+            lines.append("#   %s blocked_by=%s" % (u["id"], ",".join(u.get("blocked_by") or [])))
+    return "\n".join(lines) + "\n"
+
+
+def cmd_schedule(args):
+    """Plan parallel unit waves. Does not execute implementers or change the ledger
+    graph position — only prints (and records metrics). The orchestrator still
+    runs the work and every enter still goes through the guard.
+
+    Why this exists: `next` answers "who is ready now"; schedule answers "what is
+    the whole parallel plan given deps", which is what you need to fan work across
+    worktrees without holding the dependency graph in your head.
+    """
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if state.get("kind") not in (None, KIND_CONSTRUCTION):
+        print("rungraph: schedule is for construction runs with units "
+              "(kind=%s)" % state.get("kind"), file=sys.stderr)
+        return REFUSED
+    if not state.get("units"):
+        print("rungraph: no units declared — flat run has nothing to schedule. "
+              "`unit add` first, or stay on the single-unit path.", file=sys.stderr)
+        return REFUSED
+
+    max_width = args.max_width if getattr(args, "max_width", None) else None
+    plan = compute_schedule(state, max_width=max_width)
+    plan["run"] = rid
+    plan["node"] = state["node"]
+    plan["max_width_cap"] = max_width
+
+    metrics.record(args.dir, "schedule", run=rid, node=state["node"],
+                   waves=plan["wave_count"], width_now=plan["width_now"],
+                   max_wave_width=plan["max_wave_width"],
+                   stuck=len(plan["stuck"]), in_flight=len(plan["in_flight"]))
+
+    fmt = getattr(args, "format", None) or ("json" if args.json else "text")
+    if fmt == "json" or args.json:
+        json.dump(plan, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return OK
+    if fmt == "commands":
+        sys.stdout.write(schedule_commands(rid, plan, root,
+                                           getattr(args, "worktree_root", None)))
+        return OK
+
+    # human text
+    print("schedule for run %s (node=%s)" % (rid, state["node"]))
+    print("waves: %d    ready now: %d    peak wave width: %d%s"
+          % (plan["wave_count"], plan["width_now"], plan["max_wave_width"],
+             ("    cap=%d" % max_width) if max_width else ""))
+    if plan["in_flight"]:
+        print("in flight:")
+        for u in plan["in_flight"]:
+            print("  %-14s %s  %s" % (u["id"], u["node"], u.get("title", "")[:40]))
+    for i, wave in enumerate(plan["waves"]):
+        print("wave %d (%d parallel):" % (i, len(wave)))
+        for u in wave:
+            deps = (", after %s" % ",".join(u["depends_on"])) if u["depends_on"] else ""
+            print("  %-14s %s%s" % (u["id"], (u.get("title") or "")[:36], deps))
+    if plan["stuck"]:
+        print("STUCK (will never schedule until deps resolve):")
+        for u in plan["stuck"]:
+            print("  %-14s blocked_by=%s" % (u["id"], ",".join(u["blocked_by"]) or "?"))
+    if plan["wave_count"] == 0 and not plan["in_flight"]:
+        print("nothing to schedule — all units finished or none are startable")
+    else:
+        print("tip: `schedule --format commands` prints worktree + enter lines; "
+              "ledger still requires enter/implement per unit.")
+    return OK
+
+
+def check_verdict(state, name):
+    """Latest verdict for a named check, or None if never recorded."""
+    chk = (state.get("checks") or {}).get(name)
+    return chk.get("verdict") if chk else None
+
+
+def artifact_lines(state):
+    """Human checklist: what checkable artifacts this run has / still needs.
+
+    Pure - no I/O. `show` prints this so a resumed session sees missing pins
+    before the next `enter` refusal. Not a second schema engine: only surfaces
+    facts the ledger already stores.
+    """
+    kind = state.get("kind", KIND_CONSTRUCTION)
+    node = state.get("node") or "init"
+    lines = []
+    strict = is_strict(state)
+
+    def row(ok, label, how):
+        lines.append(("%s  %s" % ("ok " if ok else " --", label), how if not ok else None))
+
+    if kind == KIND_INCEPTION:
+        row(bool(state.get("spec")), "frame pinned (spec --file)",
+            "pin discovery with `spec --file` before sealed")
+        n_crit = len(state.get("criteria") or [])
+        row(n_crit > 0, "acceptance criteria (%d)" % n_crit,
+            "`criterion add` — seal needs at least one")
+        open_q = open_questions(state)
+        row(not open_q, "questions closed (%d open)" % len(open_q),
+            "answer or assume with --answer")
+        miss = uncovered_criteria(state)
+        row(n_crit > 0 and not miss, "criteria covered by units",
+            "uncovered: %s" % ", ".join(c["id"] for c in miss) if miss else "`unit add --covers`")
+        challenged = "challenge" in (state.get("path") or [])
+        row(challenged, "challenge visited",
+            "optional; STRICT requires `enter challenge` before sealed")
+        sealed = bool(state.get("handoff_out")) or node == "sealed"
+        row(sealed, "handoff sealed (.lider/handoffs/)",
+            "`enter sealed` when the checklist is green")
+        return lines
+
+    if kind == KIND_OPERATIONS:
+        tgt = state.get("target")
+        row(bool(tgt), "target pinned (env + ref)",
+            "`target --env ... --ref ...` before scope/act")
+        if tgt:
+            row(bool(tgt.get("previous_ref")), "previous_ref (rollback target)",
+                "optional until rollback; STRICT rollback needs it")
+        pre = check_verdict(state, "preflight")
+        row(pre == "ok", "preflight check ok",
+            "record `check --name preflight --verdict ok` (STRICT before act)")
+        eff = check_verdict(state, "effect") or check_verdict(state, "prove")
+        row(eff == "ok", "effect/prove check ok",
+            "record `check --name effect|prove` (STRICT before closed)")
+        # Incident signal: not-ok/undetermined on effect/incident names
+        signal = False
+        for name, chk in (state.get("checks") or {}).items():
+            if name in ("effect", "prove", "incident", "soak") and chk.get("verdict") in (
+                    "not-ok", "undetermined"):
+                signal = True
+                break
+        if node in ("incident", "rollback") or "incident" in (state.get("path") or []):
+            row(signal or not strict, "incident signal (failure check)",
+                "STRICT: not-ok/undetermined on effect|incident before incident")
+        rb = check_verdict(state, "rollback-preflight")
+        if node == "rollback" or "rollback" in (state.get("path") or []):
+            row(rb == "ok" or not strict, "rollback-preflight ok",
+                "STRICT: `check --name rollback-preflight --verdict ok`")
+        return lines
+
+    # construction (default)
+    row(bool(state.get("spec")), "spec pinned (spec --file)",
+        "`spec --file` then `enter spec`")
+    row(bool(state.get("handoff")), "inception handoff imported",
+        "recommended; STRICT needs `import --handoff` before implement")
+    roles = state.get("roles") or {}
+    row("implementer" in roles, "implementer assigned",
+        "`assign --role implementer --engine ...` before implement")
+    row("reviewer" in roles, "reviewer assigned (other family)",
+        "`assign --role reviewer` — refused if same family as implementer")
+    findings = state.get("findings") or []
+    any_unit_findings = any((u.get("findings") or []) for u in (state.get("units") or []))
+    past_review = node in (
+        "adjudicate", "verify", "commit", "promote", "effect", "done", "escalated")
+    if findings or any_unit_findings or past_review:
+        row(bool(findings) or any_unit_findings, "findings ingested",
+            "`findings --file` after review — schema under plugins/lider/schemas/")
+        severe_open = list(open_severe(state))
+        for u in state.get("units") or []:
+            severe_open.extend(open_severe(u))
+        if findings or any_unit_findings:
+            row(not severe_open, "no undecided BLOCKER/MAJOR",
+                "adjudicate each, or they block verify/done")
+    n_crit = len(state.get("criteria") or [])
+    if n_crit or node in ("plan", "join") or state.get("units"):
+        miss = uncovered_criteria(state)
+        row(n_crit > 0 and not miss, "criteria covered by units (mapping only)",
+            "uncovered: %s" % ", ".join(c["id"] for c in miss) if miss
+            else "`criterion add` + `unit add --covers` before plan")
+    open_q = open_questions(state)
+    if open_q or state.get("questions"):
+        row(not open_q, "open questions resolved",
+            "%d open — answer or assume with --answer" % len(open_q))
+    return lines
+
+
 def cmd_show(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
     if args.json:
@@ -1456,12 +1841,21 @@ def cmd_show(args):
         print("handoff out: %s (%s)" % (h.get("path"), (h.get("sha256") or "")[:12]))
     if state.get("target"):
         t = state["target"]
-        print("target: env=%s ref=%s%s%s"
+        print("target: env=%s ref=%s%s%s%s"
               % (t.get("env"), t.get("ref"),
+                 (" previous=%s" % t["previous_ref"]) if t.get("previous_ref") else "",
                  (" url=%s" % t["url"]) if t.get("url") else "",
                  (" surfaces=%s" % ",".join(t["surfaces"])) if t.get("surfaces") else ""))
         if t.get("construction_run"):
             print("  from construction run: %s" % t["construction_run"])
+    # Artifact checklist — missing rows are what the next `enter` is likely to refuse.
+    arts = artifact_lines(state)
+    if arts:
+        print("artifacts:")
+        for label, hint in arts:
+            print("  %s" % label)
+            if hint:
+                print("       → %s" % hint)
     if state["roles"]:
         print("roles:")
         for role, info in state["roles"].items():
@@ -1572,7 +1966,9 @@ def build_parser():
 
     q = sub.add_parser("target", help="operations: pin env/ref under change")
     q.add_argument("--env", required=True, help="environment name (prod, staging, ...)")
-    q.add_argument("--ref", required=True, help="expected git SHA, tag, or release id")
+    q.add_argument("--ref", required=True, help="expected git SHA, tag, or release id (desired/current)")
+    q.add_argument("--previous-ref", dest="previous_ref",
+                   help="last known good ref (required for STRICT rollback)")
     q.add_argument("--url", help="base URL or health endpoint of the environment")
     q.add_argument("--surfaces", help="comma-separated surfaces to verify (api,web,...)")
     q.add_argument("--notes")
@@ -1617,6 +2013,18 @@ def build_parser():
                             "one eligibility row to metrics.jsonl)")
     q.add_argument("--json", action="store_true")
     q.set_defaults(fn=cmd_next)
+
+    q = sub.add_parser("schedule",
+                       help="plan parallel unit waves from deps (does not run engines; "
+                            "records one schedule row to metrics.jsonl)")
+    q.add_argument("--json", action="store_true", help="same as --format json")
+    q.add_argument("--format", choices=["text", "json", "commands"], default="text",
+                   help="text (default), json, or shell commands with worktrees")
+    q.add_argument("--max-width", type=int, default=0,
+                   help="cap units per wave (0 = unlimited). Use when hosts/worktrees are limited")
+    q.add_argument("--worktree-root",
+                   help="with --format commands: parent dir for unit worktrees")
+    q.set_defaults(fn=cmd_schedule)
 
     q = sub.add_parser("unit", help="declare a unit of work, or list them")
     q.add_argument("action", choices=["add", "list"])

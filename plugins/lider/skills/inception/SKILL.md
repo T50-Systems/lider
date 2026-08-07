@@ -23,7 +23,7 @@ aloud when the user skips it on a large feature.
 ## Harness root
 
 ```bash
-LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
 RG=(python "${LIDER}/scripts/rungraph.py")
 ```
 
@@ -82,6 +82,19 @@ Non-strict seal **warns** if this was skipped. Strict seal **refuses**.
 "${RG[@]}" spec --file <build-spec.md> --run <build-id>   # how to implement
 # then /pipeline from enter spec onward, or the usual construction graph
 ```
+
+## Artifacts (what seal checks)
+
+| Step | Consumes | Produces |
+|---|---|---|
+| `spec` | discovery brief | frame file + hash |
+| criteria / questions / units | frame | ledger objects (mapping only) |
+| `challenge` | frame (optional; **required in strict**) | path includes challenge |
+| `sealed` | closed questions, covered criteria | `.lider/handoffs/<id>.json` + sha256 |
+
+`rungraph.py show` lists these under **artifacts:** before you hit a seal refusal.
+
+**Loop vs graph:** challenge/re-spec is a small loop on the discovery graph — do not add persona or “component” nodes. If it is not checkable, keep it prose in the frame.
 
 ## Standing rules
 

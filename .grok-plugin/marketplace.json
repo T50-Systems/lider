@@ -10,9 +10,15 @@
     {
       "name": "lider",
       "source": "./plugins/lider",
-      "description": "Lider: inception / construction / operations ledgers, multi-engine runtime, pair-review, promote, preflight/verify. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify.",
-      "version": "0.16.0",
-      "keywords": ["orchestration", "pipeline", "operations", "pair-review", "multi-engine"]
+      "description": "Lider multi-harness (Claude Code, Grok, OpenCode, Codex, Pi): inception/construction/operations, multi-engine adapters. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify.",
+      "version": "0.19.0",
+      "keywords": [
+        "orchestration",
+        "pipeline",
+        "operations",
+        "pair-review",
+        "multi-engine"
+      ]
     }
   ]
 }

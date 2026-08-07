@@ -9,19 +9,23 @@ You are the pair reviewer. The prompt gives you a diff (or scope instructions) a
 ## Harness root
 
 ```bash
-LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
 ```
 
-If both are empty, derive the plugin root from this agent file's path (parent of `agents/`).
+If empty, derive from this agent file's path (parent of `agents/`) or
+`python -c "from lider.root import plugin_root; print(plugin_root())"` with
+`plugins/lider/scripts` on `PYTHONPATH`.
 
 ## Flow
 
 1. **Build the review prompt for the reviewing engine.** Ask it to review for correctness bugs, security issues, and possible regressions, and to return findings per the schema with the engine id you invoked and a global verdict (`approve` | `approve_with_nits` | `request_changes`). Include the diff if you were given one; otherwise tell it which files to read from the repo (its read-only lockdown can read the tree).
 
 2. **Pick the OTHER engine family** (never same-family as the implementer of this work):
-   - Host is **Grok Build** (you are Grok) → default `--engine claude`
+   - Prefer a different **runtime family**: `claude` | `grok` | `codex` | `opencode` | `pi`
+   - Host is **Grok Build** → default `--engine claude`
    - Host is **Claude Code** → default `--engine grok`
-   - Caller may override with an explicit engine id; still refuse same-family as the implementer when known
+   - Host is **OpenCode / Pi / Codex** → default `--engine claude` or `--engine grok` (not the same runtime as the implementer)
+   - Caller may override; still refuse same-family when known
 
 3. **Invoke the hardened wrapper:**
    ```
