@@ -64,7 +64,7 @@ Two languages, divided by job, not by habit:
 | `scripts/lider/adapters/*.py` | One module per engine — the only place a CLI is named. `generic.py` is the reference and the fallback. |
 | `scripts/agent-exec.py` | **Review** wrapper: read-only, `--engine`/`--model`, schema-bound, validated findings JSON. |
 | `scripts/agent-implement.py` | **Implementer** wrapper: write access, background-friendly (`<done>` marker), safe checkpoint auto-retry. |
-| `scripts/rungraph.py` | **The run ledger**: the flow as an enforced state machine — legal edges, three-valued checks, reviewer≠implementer, a bounded *and converging* adjudication loop, resumable across sessions. |
+| `scripts/rungraph.py` | **The run ledger**: the flow as an enforced state machine — legal edges, three-valued checks, reviewer≠implementer, a bounded *and converging* adjudication loop, **units of work as subgraphs** with dependency edges and a join barrier, resumable across sessions. |
 | `scripts/fanout.py` | **Fan-out**: N lenses reviewed concurrently, then N skeptics per severe claim. Counts absences as absences. |
 | `scripts/reduce-findings.py` | Merges a fan-out into one round: dedup, corroboration by engine and by lens, missing-lens accounting. |
 | `scripts/verify-findings.py` | Applies refutation ballots: majority rule, quorum, low-confidence discounting. |
