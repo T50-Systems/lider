@@ -14,6 +14,7 @@ KEEP_CONFIG = re.compile(r"^(model|model_reasoning_effort|service_tier)\s*=")
 class CodexAdapter(Adapter):
     id = "codex"
     has_inflight = True       # grammar below is the CLI's own stream markers
+    streams = True            # narrates as it works, so early silence is suspicious
     native_schema = True      # --output-schema is enforced server-side
 
     def locate(self):
