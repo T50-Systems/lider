@@ -50,6 +50,10 @@ flat because …").
 before `enter implement`. Challenge is required before inception `enter sealed`. Use strict
 when the user asks for it or the risk warrants no shortcuts.
 
+When promotion reaches a shared environment, prefer **`/operate`** (or at least `/preflight`
+before and `/verify` after). Construction `promote → effect` still works for feature ship;
+operations is the dedicated ledger when the work *is* touching shared state.
+
 ## Standing rule for every step: "I could not check" is NOT "it is fine"
 
 Every check in this flow — yours, the implementer's, the reviewer's — has **three** outcomes,

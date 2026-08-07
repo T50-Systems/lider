@@ -161,12 +161,24 @@ class InceptionHandoff(BaseModel):
     sha256: str
 
 
+class OpsTarget(BaseModel):
+    """Declared operational target. Live probes stay in check evidence rows."""
+    model_config = STRICT
+    env: str
+    ref: str
+    url: Optional[str] = None
+    surfaces: List[str] = []
+    notes: Optional[str] = None
+    construction_run: Optional[str] = None
+    at: int
+
+
 class Run(BaseModel):
     model_config = STRICT
     schema_version: int
     run_id: str
     title: str
-    kind: Literal["construction", "inception"] = "construction"
+    kind: Literal["construction", "inception", "operations"] = "construction"
     strict: bool = False
     created_at: int
     updated_at: int
@@ -185,6 +197,7 @@ class Run(BaseModel):
     handoff: Optional[HandoffRef] = None
     handoff_out: Optional[HandoffRef] = None
     inception_frame: Optional[Spec] = None
+    target: Optional[OpsTarget] = None
 
 
 class Usage(BaseModel):

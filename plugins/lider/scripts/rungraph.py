@@ -79,8 +79,28 @@ INCEPTION_GRAPH = {
     "sealed":    [],
 }
 
+# Operations (optional separate run). Touch shared / deployed state: pin a target,
+# record preflight (ternary), act, prove effect, optional soak, close.
+# Complements construction's promote→effect leg: use this when the action is not
+# "finish this feature ledger" but "may I touch prod / did it arrive".
+# RECOMMENDED before/after shared-state changes; STRICT requires preflight ok
+# before act and effect/prove ok before closed.
+OPERATIONS_GRAPH = {
+    "init":      ["scope"],
+    "scope":     ["preflight", "blocked"],
+    "preflight": ["act", "blocked"],
+    "act":       ["prove", "blocked", "escalated"],
+    "prove":     ["soak", "closed", "act", "escalated"],
+    "soak":      ["closed", "act", "escalated"],
+    "blocked":   ["scope", "preflight"],
+    "escalated": ["scope", "closed"],
+    "closed":    [],
+}
+
 KIND_CONSTRUCTION = "construction"
 KIND_INCEPTION = "inception"
+KIND_OPERATIONS = "operations"
+KINDS = (KIND_CONSTRUCTION, KIND_INCEPTION, KIND_OPERATIONS)
 HANDOFF_KIND = "lider.inception.handoff"
 HANDOFF_VERSION = 1
 
@@ -158,9 +178,26 @@ def run_path(root, run_id):
 
 def graph_for(state):
     """Which edge table this run walks. Kind defaults to construction for old ledgers."""
-    if state.get("kind") == KIND_INCEPTION:
+    kind = state.get("kind") or KIND_CONSTRUCTION
+    if kind == KIND_INCEPTION:
         return INCEPTION_GRAPH
+    if kind == KIND_OPERATIONS:
+        return OPERATIONS_GRAPH
     return GRAPH
+
+
+def check_named(state, *names):
+    """First matching check by name, or None."""
+    checks = state.get("checks") or {}
+    for name in names:
+        if name in checks:
+            return checks[name]
+    return None
+
+
+def check_verdict_ok(state, *names):
+    chk = check_named(state, *names)
+    return bool(chk and chk.get("verdict") == "ok")
 
 
 def env_strict():
@@ -382,8 +419,8 @@ def cmd_init(args):
         print("rungraph: run '%s' already exists (use --force to reset)" % rid, file=sys.stderr)
         return REFUSED
     kind = getattr(args, "kind", None) or KIND_CONSTRUCTION
-    if kind not in (KIND_CONSTRUCTION, KIND_INCEPTION):
-        print("rungraph: --kind must be construction or inception", file=sys.stderr)
+    if kind not in KINDS:
+        print("rungraph: --kind must be one of: %s" % ", ".join(KINDS), file=sys.stderr)
         return USAGE
     strict = bool(getattr(args, "strict", False) or env_strict())
     state = {
@@ -407,6 +444,7 @@ def cmd_init(args):
         "events": [],
         "handoff": None,       # construction: imported sealed handoff ref
         "handoff_out": None,   # inception: path written by seal
+        "target": None,        # operations: env / ref / surfaces under change
     }
     save(root, rid, state)
     # The ledger is working state, not source. Keep it out of the repo by
@@ -423,6 +461,17 @@ def cmd_init(args):
         if not strict:
             print("inception: challenge is OPTIONAL (warns at sealed). "
                   "Strict mode requires it: init --strict or LIDER_STRICT=1.")
+    elif kind == KIND_OPERATIONS:
+        print("operations: shared/deployed state - pin target, preflight, act, prove "
+              "effect, optional soak, close. Use /preflight and /verify for how to check.")
+        print("operations: RECOMMENDED around deploys/merges to shared envs; not required "
+              "for pure local work. Construction promote->effect remains for feature ship.")
+        if strict:
+            print("STRICT: `check --name preflight --verdict ok` before act; "
+                  "`check --name effect|prove --verdict ok` before closed.")
+        else:
+            print("operations: preflight/effect checks OPTIONAL (warn if missing). "
+                  "Strict: init --strict or LIDER_STRICT=1.")
     else:
         print("construction: a sealed inception handoff is RECOMMENDED "
               "(`import --handoff .lider/handoffs/<id>.json`), not required. "
@@ -430,6 +479,77 @@ def cmd_init(args):
         if strict:
             print("STRICT: `import --handoff` is required before `enter implement`.")
     return OK
+
+
+def cmd_target(args):
+    """Operations: pin what environment / ref / surface is under change.
+
+    Checkable fields only - the ledger does not SSH into prod. Evidence of
+    what is live stays in `check` rows; this is the declared target.
+    """
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if state.get("kind") != KIND_OPERATIONS and not args.force:
+        print("rungraph: target is for operations runs (`init --kind operations`)",
+              file=sys.stderr)
+        return REFUSED
+    if not args.env or not args.ref:
+        print("rungraph: target needs --env and --ref (e.g. --env prod --ref abc1234)",
+              file=sys.stderr)
+        return USAGE
+    state["target"] = {
+        "env": args.env,
+        "ref": args.ref,
+        "url": args.url or None,
+        "surfaces": csv_ids(args.surfaces),
+        "notes": args.notes or None,
+        "construction_run": args.construction_run or None,
+        "at": int(time.time()),
+    }
+    commit(root, rid, state, "target", env=args.env, ref=args.ref)
+    print("target pinned: env=%s ref=%s%s%s"
+          % (args.env, args.ref,
+             (" url=%s" % args.url) if args.url else "",
+             (" surfaces=%s" % ",".join(state["target"]["surfaces"]))
+             if state["target"]["surfaces"] else ""))
+    return OK
+
+
+def check_ops_scope(state, force):
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot enter scope work without a target. "
+            "`target --env <name> --ref <sha|tag>` first.")
+    return OK, None
+
+
+def check_ops_act(state, force):
+    """May we act on shared state? Preflight check is RECOMMENDED; STRICT requires ok."""
+    if force:
+        return OK, None
+    if not state.get("target"):
+        return UNDETERMINED, (
+            "cannot act - no target pinned. `target --env ... --ref ...` first.")
+    if is_strict(state):
+        if not check_verdict_ok(state, "preflight"):
+            return REFUSED, (
+                "STRICT: cannot act without `check --name preflight --verdict ok "
+                "--evidence ...`. Run the /preflight skill and record the GO, or --force.")
+    return OK, None
+
+
+def check_ops_closed(state, force):
+    """May we close the ops run? Effect proof is RECOMMENDED; STRICT requires ok."""
+    if force:
+        return OK, None
+    if is_strict(state):
+        if not check_verdict_ok(state, "effect", "prove"):
+            return REFUSED, (
+                "STRICT: cannot close without `check --name effect` (or prove) "
+                "--verdict ok --evidence ...`. Run /verify against the live surface, "
+                "or --force.")
+    return OK, None
 
 
 def cmd_unit(args):
@@ -601,6 +721,10 @@ def cmd_question(args):
 
 def cmd_spec(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
+    if state.get("kind") == KIND_OPERATIONS and not args.force:
+        print("rungraph: operations runs pin a `target`, not a build spec. "
+              "Use `target --env ... --ref ...`.", file=sys.stderr)
+        return REFUSED
     with open(args.file, encoding="utf-8") as fh:
         text = fh.read()
     inception = state.get("kind") == KIND_INCEPTION
@@ -1063,6 +1187,38 @@ def evaluate_run(state, dest, force):
             return check_seal(state, force)
         return OK, None
 
+    # --- operations-only destinations --------------------------------------
+    if state.get("kind") == KIND_OPERATIONS:
+        foreign = set(GRAPH) | set(INCEPTION_GRAPH) | set(UNIT_GRAPH)
+        if dest not in graph and dest in foreign:
+            return REFUSED, (
+                "operations run cannot enter '%s' - use scope/preflight/act/prove/soak/closed. "
+                "Feature build stays on a construction run." % dest)
+        code, message = check_edge(graph, cur, dest, "", "node")
+        if code != OK:
+            return code, message
+        if dest == "scope":
+            # Pinning target can happen before or at scope; require it to leave scope
+            # toward preflight, not to enter scope itself.
+            return OK, None
+        if dest == "preflight":
+            return check_ops_scope(state, force)
+        if dest == "act":
+            return check_ops_act(state, force)
+        if dest == "closed":
+            return check_ops_closed(state, force)
+        # prove, soak, blocked, escalated: edge + optional global check blocks
+        if dest in ("prove", "soak") and not force:
+            bad, unknown = blocking_checks(state)
+            if bad:
+                return REFUSED, ("cannot enter '%s' - failing check(s): %s"
+                                 % (dest, ", ".join(bad)))
+            if unknown:
+                return UNDETERMINED, (
+                    "cannot enter '%s' - check(s) UNDETERMINED: %s. Not a pass."
+                    % (dest, ", ".join(unknown)))
+        return OK, None
+
     code, message = check_edge(graph, cur, dest, "", "node")
     if code != OK:
         return code, message
@@ -1155,11 +1311,25 @@ def cmd_enter(args):
               "High-risk work should enter challenge first.", file=sys.stderr)
 
     # Construction without handoff: recommended, never silent in non-strict either.
-    if (not args.unit and dest == "implement" and state.get("kind") != KIND_INCEPTION
+    if (not args.unit and dest == "implement"
+            and state.get("kind") == KIND_CONSTRUCTION
             and not state.get("handoff") and not is_strict(state) and not args.force):
         print("rungraph: note: no inception handoff imported. RECOMMENDED: run "
               "inception, `enter sealed`, then `import --handoff .lider/handoffs/<id>.json`. "
               "Flat path is allowed; STRICT mode would refuse.", file=sys.stderr)
+
+    # Operations: warn (non-strict) when acting without a recorded preflight GO,
+    # or closing without an effect proof.
+    if (not args.unit and state.get("kind") == KIND_OPERATIONS
+            and not is_strict(state) and not args.force):
+        if dest == "act" and not check_verdict_ok(state, "preflight"):
+            print("rungraph: WARNING: acting without `check --name preflight --verdict ok`. "
+                  "RECOMMENDED: run /preflight and record GO. STRICT would refuse.",
+                  file=sys.stderr)
+        if dest == "closed" and not check_verdict_ok(state, "effect", "prove"):
+            print("rungraph: WARNING: closing without `check --name effect|prove --verdict ok`. "
+                  "RECOMMENDED: run /verify against the live surface. STRICT would refuse.",
+                  file=sys.stderr)
 
     # One mutation path. scope_of(state, None) is the run itself, so the unit and
     # run cases differ only in what the event records and how the line reads.
@@ -1284,6 +1454,14 @@ def cmd_show(args):
     if state.get("handoff_out"):
         h = state["handoff_out"]
         print("handoff out: %s (%s)" % (h.get("path"), (h.get("sha256") or "")[:12]))
+    if state.get("target"):
+        t = state["target"]
+        print("target: env=%s ref=%s%s%s"
+              % (t.get("env"), t.get("ref"),
+                 (" url=%s" % t["url"]) if t.get("url") else "",
+                 (" surfaces=%s" % ",".join(t["surfaces"])) if t.get("surfaces") else ""))
+        if t.get("construction_run"):
+            print("  from construction run: %s" % t["construction_run"])
     if state["roles"]:
         print("roles:")
         for role, info in state["roles"].items():
@@ -1370,12 +1548,13 @@ def build_parser():
 
     q = sub.add_parser("init", help="start a run")
     q.add_argument("--title", required=True)
-    q.add_argument("--kind", choices=[KIND_CONSTRUCTION, KIND_INCEPTION],
+    q.add_argument("--kind", choices=list(KINDS),
                    default=KIND_CONSTRUCTION,
-                   help="construction (default, build+ship) or inception (discovery, seal handoff)")
+                   help="construction (default), inception (discovery), or operations (shared state)")
     q.add_argument("--strict", action="store_true",
-                   help="require challenge before seal (inception) and handoff import "
-                        "before implement (construction). Also set by LIDER_STRICT=1")
+                   help="stricter gates: inception challenge+handoff import; "
+                        "operations preflight before act and effect before closed. "
+                        "Also LIDER_STRICT=1")
     q.add_argument("--max-rounds", type=int, default=3)
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_init)
@@ -1390,6 +1569,17 @@ def build_parser():
     q.add_argument("--handoff", required=True, help="path to sealed handoff JSON")
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_import)
+
+    q = sub.add_parser("target", help="operations: pin env/ref under change")
+    q.add_argument("--env", required=True, help="environment name (prod, staging, ...)")
+    q.add_argument("--ref", required=True, help="expected git SHA, tag, or release id")
+    q.add_argument("--url", help="base URL or health endpoint of the environment")
+    q.add_argument("--surfaces", help="comma-separated surfaces to verify (api,web,...)")
+    q.add_argument("--notes")
+    q.add_argument("--construction-run", dest="construction_run",
+                   help="optional construction run id this ops action ships")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_target)
 
     q = sub.add_parser("assign", help="record who plays a role")
     q.add_argument("--role", required=True,
