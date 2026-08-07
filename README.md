@@ -8,11 +8,12 @@ For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For c
 
 ## Skills
 
-- **`/inception <theme> [--strict]`** — **recommended** discovery run (separate ledger): frame, criteria, questions, units, optional challenge, seal to `.lider/handoffs/`. Not required for small tickets; **strict** requires challenge at seal and handoff import before construction implement.
-- **`/pair-review [scope]`** — independent review of the current diff with the second engine. Structured findings, hard timeout (no zombies), and a mandatory fallback to reviewing it ourselves if the second engine does not respond.
-- **`/pipeline <description> [--impl opus|sonnet|fable|grok]`** — construction phase: closed build spec → implementer → cross-engine pair-review → adjudication → verification → commit → promotion. Prefer `/inception` first on non-trivial work (`import --handoff …`).
-- **`/promote [--yes] [title]`** — PR promotion: branch → PR to `dev` → merge → production gate → PR `dev`→`main` → merge → local sync.
-- **`/preflight`**, **`/verify`** — operating half before shared-state changes and after deploy.
+- **`/inception <theme> [--strict]`** — **recommended** discovery run: frame, criteria, questions, units, optional challenge, seal to `.lider/handoffs/`. Strict: challenge at seal + handoff import before implement.
+- **`/pipeline <description> [--impl opus|sonnet|fable|grok]`** — construction: build spec → implement → cross-engine review → adjudicate → commit → promote. Prefer `/inception` first on non-trivial work.
+- **`/operate <action> [--strict]`** — **recommended** operations ledger for shared/deployed state: target → preflight → act → prove effect → close. How to check: `/preflight` + `/verify`. Strict: preflight ok before act, effect ok before close.
+- **`/pair-review [scope]`** — independent review with the second engine family (fallback to host).
+- **`/promote [--yes] [title]`** — PR promotion (often the **act** inside `/operate`).
+- **`/preflight`**, **`/verify`** — establish conditions before shared-state changes; prove effect after.
 
 ## How it works
 
