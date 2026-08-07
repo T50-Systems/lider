@@ -70,6 +70,11 @@ KINDS = (KIND_CONSTRUCTION, KIND_INCEPTION, KIND_OPERATIONS)
 HANDOFF_KIND = "lider.inception.handoff"
 HANDOFF_VERSION = 1
 
+# Intermediate artifact: session log / transcript → structured plan (before seal).
+# Not a handoff: no seal hash required; apply seeds the ledger only.
+PLAN_KIND = "lider.session.plan"
+PLAN_VERSION = 1
+
 # The subgraph one UNIT OF WORK walks. A phase's spec is required to "split the
 # feature into implementable units", and until now that sentence had no
 # representation: a phase with three units was one flat run, and the ledger could

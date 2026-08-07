@@ -2,6 +2,7 @@
 import argparse
 import sys
 
+from .commands_extract import cmd_apply_plan, cmd_extract
 from .commands_flow import cmd_enter, cmd_gate
 from .commands_review import cmd_adjudicate, cmd_findings, cmd_import
 from .commands_setup import (
@@ -17,6 +18,7 @@ from .commands_setup import (
 from .constants import (
     DECISIONS,
     KIND_CONSTRUCTION,
+    KIND_INCEPTION,
     KINDS,
     USAGE,
     VERDICTS,
@@ -166,6 +168,46 @@ def build_parser():
     q = sub.add_parser("show", help="what a resumed orchestrator reads first")
     q.add_argument("--json", action="store_true")
     q.set_defaults(fn=cmd_show)
+
+    q = sub.add_parser(
+        "extract",
+        help="session log / transcript → lider.session.plan (trace-to-graph; no LLM)")
+    q.add_argument("--file", required=True,
+                   help="session log (.md/.txt) or structured plan/handoff JSON")
+    q.add_argument("--out", help="where to write the plan JSON "
+                                 "(default: .lider/plans/<title>.plan.json)")
+    q.add_argument("--json", action="store_true", help="also dump plan to stdout")
+    q.add_argument("--apply", action="store_true",
+                   help="after extract, seed a run (use --run / --init; see apply-plan)")
+    q.add_argument("--init", action="store_true",
+                   help="with --apply: create the run if missing (default when --run omitted)")
+    q.add_argument("--kind", choices=[KIND_INCEPTION, KIND_CONSTRUCTION],
+                   default=KIND_INCEPTION, help="with --apply/--init (default: inception)")
+    q.add_argument("--title", help="with --apply: run title")
+    q.add_argument("--strict", action="store_true")
+    q.add_argument("--max-rounds", type=int, default=3)
+    q.add_argument("--frame-out", dest="frame_out",
+                   help="with --apply: path for the written frame markdown")
+    q.add_argument("--enter-spec", action="store_true",
+                   help="with --apply: move init→spec after seeding")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_extract)
+
+    q = sub.add_parser(
+        "apply-plan",
+        help="seed a run from a lider.session.plan (does not seal handoff)")
+    q.add_argument("--plan", required=True, help="path to .plan.json from extract")
+    q.add_argument("--init", action="store_true",
+                   help="create run if needed (inception by default; use --run for id)")
+    q.add_argument("--kind", choices=[KIND_INCEPTION, KIND_CONSTRUCTION],
+                   default=KIND_INCEPTION)
+    q.add_argument("--title", help="title when creating a run")
+    q.add_argument("--strict", action="store_true")
+    q.add_argument("--max-rounds", type=int, default=3)
+    q.add_argument("--frame-out", dest="frame_out")
+    q.add_argument("--enter-spec", action="store_true")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_apply_plan)
     return p
 
 

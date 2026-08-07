@@ -56,6 +56,10 @@ python "${LIDER}/scripts/rungraph.py" import --handoff .lider/handoffs/<id>.json
 When you skip inception on a large feature, **say so** ("inception recommended; proceeding
 flat because …").
 
+If discovery already lives in a **session log / notes dump**, reify it instead of retyping:
+`rungraph extract --file session.md` → plan JSON; `apply-plan` seeds inception (frame +
+criteria + units). Still seal and import as usual — see `/inception` *From a session log*.
+
 **Strict mode** (`init --strict` or `LIDER_STRICT=1`): handoff **import is required**
 before `enter implement`. Challenge is required before inception `enter sealed`. Use strict
 when the user asks for it or the risk warrants no shortcuts.

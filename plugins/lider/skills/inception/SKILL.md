@@ -74,6 +74,32 @@ Non-strict seal **warns** if this was skipped. Strict seal **refuses**.
 "${RG[@]}" show --run <id>
 ```
 
+## From a session log (trace → graph)
+
+When discovery already happened in a chat/notes dump, **do not retype the ledger
+by hand**. Reify the log into a plan, then seed inception:
+
+```bash
+# 1) parse only → .lider/plans/<title>.plan.json (no ledger writes)
+"${RG[@]}" extract --file session.md [--out plan.json]
+
+# 2) seed an inception run (frame pin + criteria + questions + units). Does NOT seal.
+"${RG[@]}" --run <id> apply-plan --plan plan.json --init --enter-spec --title "<theme>"
+
+# or one shot:
+"${RG[@]}" --run <id> extract --file session.md --apply --init --enter-spec --title "<theme>"
+```
+
+Heuristic extract is **deterministic** (no LLM): it reads markdown sections
+(`## Scope`, `## Hard constraints`, `## Acceptance criteria`, `## Open questions`,
+`## Units`) and lines like `AC1: …`, `unit auth: …`, `covers:`, `depends on:`.
+You can also hand-author a JSON plan (`kind: lider.session.plan`) and pass that
+to `extract` / `apply-plan`.
+
+**Still required after apply:** review the frame, fix mapping, resolve open
+questions (or assume with `--answer`), optional challenge, then `enter sealed`.
+Coverage of criteria by units remains a **mapping** check only.
+
 ## Hand off to construction
 
 ```bash
