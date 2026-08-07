@@ -1,0 +1,14 @@
+# Coverage is a gate, not a dashboard: `--cov` fails below the floor rather than
+# printing a number nobody reads. The floor was reached by testing what had never
+# been tested, not by lowering it.
+[run]
+source = plugins/lider/scripts
+omit =
+    */__pycache__/*
+[report]
+fail_under = 90
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
