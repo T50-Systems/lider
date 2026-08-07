@@ -5,7 +5,7 @@ import re
 import shutil
 
 from . import Adapter, AdapterRefused
-from ..extract import extract_to
+from ..extract import extract_to, balanced_objects
 
 
 class GrokAdapter(Adapter):
@@ -55,12 +55,20 @@ class GrokAdapter(Adapter):
                 text = fh.read()
         except OSError:
             return None
+        # A flat regex was wrong here: the real envelope NESTS `usage` and
+        # `modelUsage`, so a `[^{}]*` pattern never matched and every Grok run was
+        # recorded as cost-unmeasured while the number sat in the log. Scan for
+        # balanced objects instead, and take the last one that carries the fields.
         doc = None
-        for match in re.finditer(r"\{[^{}]*\"(?:total_cost_usd|usage)\"[^{}]*\}", text):
+        for span in balanced_objects(text):
+            if '"total_cost_usd"' not in span and '"usage"' not in span:
+                continue
             try:
-                doc = json.loads(match.group(0))
+                candidate = json.loads(span)
             except ValueError:
                 continue
+            if isinstance(candidate, dict):
+                doc = candidate
         if not doc:
             return None
         used = doc.get("usage") or {}

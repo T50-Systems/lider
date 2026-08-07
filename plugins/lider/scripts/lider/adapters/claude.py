@@ -83,11 +83,19 @@ class ClaudeAdapter(Adapter):
         try:
             with open(log_path, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
-                    if '"type":"result"' in line:
-                        try:
-                            result = json.loads(line.strip())
-                        except ValueError:
-                            pass
+                    line = line.strip()
+                    # Parse and inspect the field rather than substring-matching
+                    # `"type":"result"`: that only holds for compact output, and
+                    # a single space in the serialisation made the whole run read
+                    # as cost-unmeasured.
+                    if not line.startswith("{") or '"result"' not in line:
+                        continue
+                    try:
+                        doc = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(doc, dict) and doc.get("type") == "result":
+                        result = doc
         except OSError:
             return None
         if not result:

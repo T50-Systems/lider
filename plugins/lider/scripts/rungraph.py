@@ -240,10 +240,15 @@ def cmd_spec(args):
         print("rungraph: spec appears to be missing section(s): %s "
               "(use --force to accept anyway)" % ", ".join(missing), file=sys.stderr)
         return REFUSED
+    # Store the TEXT, not just a pointer to it. The spec is the phase's most
+    # important deliverable and the only record of what was decided before any
+    # code existed - and a ledger that holds a path is one `git mv` away from
+    # pointing at nothing. Measured: moving a spec into docs/specs/ orphaned it.
     state["spec"] = {
         "path": os.path.abspath(args.file),
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "bytes": len(text.encode("utf-8")),
+        "text": text,
         "at": int(time.time()),
     }
     log_event(state, "spec", sha256=state["spec"]["sha256"][:12])
@@ -323,7 +328,11 @@ def cmd_findings(args):
         # A defect keeps ONE identity across rounds. Without this, convergence
         # can only count findings - and a count cannot tell "two fixed, one new"
         # from "the same BLOCKER came back for the third time".
-        prior = fx.match(entry, state["findings"])
+        # Only PRIOR rounds: two reviewers describing one defect inside the same
+        # round is the reducer's job, and counting it as a recurrence mislabels a
+        # first sighting as a defect that came back.
+        prior = fx.match(entry, [f for f in state["findings"]
+                                 if f.get("round") != round_no])
         if prior is not None:
             entry["defect_id"] = prior.get("defect_id", prior["id"])
             entry["recurrence_of"] = prior["id"]
