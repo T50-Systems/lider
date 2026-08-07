@@ -486,7 +486,7 @@ def main():
     args.schema = os.path.abspath(SCHEMA_FINDINGS)
     args.schema_refute = os.path.abspath(SCHEMA_REFUTE)
     if not os.path.exists(AGENT_EXEC):
-        print("fanout: agent-exec.sh not found at %s" % AGENT_EXEC, file=sys.stderr)
+        print("fanout: agent-exec.py not found at %s" % AGENT_EXEC, file=sys.stderr)
         return USAGE
     return args.fn(args)
 

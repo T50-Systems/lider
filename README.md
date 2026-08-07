@@ -73,7 +73,6 @@ Two languages, divided by job, not by habit:
 | `scripts/lider/log.py` | The three output destinations and their rules (live stdout, stderr + `LIDER_DEBUG`, and the engine-only run log). |
 | `scripts/lider/extract.py` | Recovers a result payload from an engine that prints instead of writing a file (envelopes, fences, ANSI). |
 | `scripts/lider/validate.py` | Local schema validation for engines with no server-side guarantee. |
-| `scripts/{agent,codex}-{exec,implement}.sh` | Compatibility shims. |
 | `agents/pair-reviewer.md` | Reviewer agent with a mandatory Claude fallback. |
 | `schemas/findings.schema.json` | Review output contract (engine, verdict, findings). |
 | `schemas/refutation.schema.json` | Refutation ballot contract. |
@@ -109,8 +108,8 @@ even reported `init.model: claude-haiku-4-5`; only the billed model exposed it.
 ## Tests
 
 ```bash
-python -m pytest -m "not slow"    # 92 tests, ~23s - run this on every change
-python -m pytest                  # + 14 supervision tests that drive real processes, ~96s
+python -m pytest -m "not slow"    # 175 tests, ~40s - run this on every change
+python -m pytest                  # + 14 supervision tests that drive real processes, ~3m
 ```
 
 No engine is ever called: every test drives a fake engine that is a small Python
