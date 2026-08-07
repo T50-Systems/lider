@@ -1,6 +1,6 @@
 # lider
 
-A Claude Code plugin that orchestrates the T50 engineering flow, **engine-agnostic**: an architect specs and adjudicates, an implementer executes, a *different* engine reviews, and the work is promoted through pull requests. The engines available on this install are **claude** (default) and **grok**; `calvoproxy` serves as a cheap third opinion. **Codex is not reachable on this account** - its binary is on `PATH` but every run fails on the usage limit, so its adapter is kept ready rather than routed to. Distributed via the `t50` marketplace.
+A **multi-harness** workflow plugin for **Claude Code**, **Grok Build**, **OpenCode**, **Codex**, and **Pi**. Engine-agnostic runtime: an architect specs and adjudicates, an implementer executes, a *different* engine family reviews, and work is promoted through PRs. Shipped engine adapters: `claude` (default), `grok`, `codex`, `opencode`, `pi`, `calvoproxy` (contrast only), `generic`. Distributed via the `t50` marketplace (Claude/Grok) and `install-skills.py` for OpenCode/Pi/Codex discovery paths.
 
 The design goal is a flow that is **resilient, observable, and self-recovering**: you always know what each engine is doing, failures surface in minutes (not at a timeout), transient errors recover automatically and safely, and no orphaned processes are ever left behind.
 
@@ -8,9 +8,13 @@ For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For c
 
 ## Skills
 
-- **`/pair-review [scope]`** — independent review of the current diff with the second engine. Structured findings, hard timeout (no zombies), and a mandatory fallback to reviewing it ourselves if the second engine does not respond.
-- **`/pipeline <description> [--impl codex|opus|fable]`** — a full phase: closed architect spec → decision-density-routed background implementer → cross-engine pair-review → finding-by-finding adjudication → verification → commit → promotion. `--impl` pins the implementer and auto-assigns the *opposite* engine as reviewer; if you don't pin one, the pipeline asks which engine should implement.
-- **`/promote [--yes] [title]`** — PR promotion: branch → PR to `dev` → merge → production gate → PR `dev`→`main` → merge → local sync.
+- **`/inception <theme> [--strict]`** — **recommended** discovery run: frame, criteria, questions, units, optional challenge, seal to `.lider/handoffs/`. Strict: challenge at seal + handoff import before implement.
+- **`/pipeline <description> [--impl opus|sonnet|fable|grok]`** — construction: build spec → implement → cross-engine review → adjudicate → commit → promote. Prefer `/inception` first on non-trivial work.
+- **`/schedule [--max-width N]`** — plan **parallel unit waves** from deps (`rungraph schedule`); prints worktree commands. Does not run engines; use when multi-unit sequential feels too heavy.
+- **`/operate <action> [--strict]`** — **recommended** operations ledger: target → preflight → act → prove → close, plus **incident → rollback** (or forward fix) when effect fails. How to check: `/preflight` + `/verify`.
+- **`/pair-review [scope]`** — independent review with the second engine family (fallback to host).
+- **`/promote [--yes] [title]`** — PR promotion (often the **act** inside `/operate`).
+- **`/preflight`**, **`/verify`** — establish conditions before shared-state changes; prove effect after.
 
 ## How it works
 
@@ -39,11 +43,13 @@ Selected with `--engine <id>`, or `LIDER_ENGINE`. Contract and how to add one: [
 
 | id | Kind | In-flight | Implement | Notes |
 |---|---|---|---|---|
-| `codex` | agentic CLI | ✅ | ✅ full access | isolated `CODEX_HOME`; native `--output-schema`. **Needs a paid account this install does not have** — kept for when that changes |
-| `claude` | agentic CLI | ✅ | ✅ | **default engine**; native `--json-schema`; `--bare` only when `ANTHROPIC_API_KEY` is set |
-| `grok` | agentic CLI | ❌ | ✅ | review locks down with permission *rules* — its tool denylist fails open |
-| `calvoproxy` | chat completion | ❌ | ⛔ refused | free models, no tools; contrast/bulk only |
-| `generic` | any CLI | ❌ | ✅ | configured via `LIDER_BIN` / `LIDER_ARGS_*`; the fallback for unknown ids |
+| `claude` | agentic CLI | ✅ | ✅ | **default**; native `--json-schema`; `--bare` only with `ANTHROPIC_API_KEY` |
+| `grok` | agentic CLI | ❌ | ✅ | permission *rules* for review; `--yolo` for implement |
+| `codex` | agentic CLI | ✅ | ✅ full access | isolated `CODEX_HOME`; may be usage-limited on some accounts |
+| `opencode` | agentic CLI | ❌ | ✅ `--auto` | `opencode run --format json` |
+| `pi` | agentic CLI | ❌ | ✅ | `pi -p --mode json`; review = read-only tools |
+| `calvoproxy` | HTTP chat (CalvoProxy) | ❌ | ⛔ refused | **This adapter** = one completion via local proxy, no tools/filesystem. Free/cheap models **with tools** go through `--engine opencode` (or `pi`/`claude`/…) configured with that model — not this adapter |
+| `generic` | any CLI | ❌ | ✅ | `LIDER_BIN` / `LIDER_ARGS_*`; fallback for unknown ids |
 
 ## Language split
 
@@ -180,14 +186,47 @@ Behavior is tunable via environment variables (sane defaults; all validated). Th
 
 ## Requirements
 
-- Second review engine: **Codex CLI ≥ 0.144.1** on `PATH` (`codex --version`). Without it, `/pair-review` falls back to Claude.
-- Bash (Git Bash on Windows). Shell scripts are pinned to LF via `.gitattributes`.
+- **Python 3** on `PATH` (stdlib only at runtime).
+- At least two engine families for cross-engine review. On this install: **claude** + **grok** CLIs. Codex is optional (adapter kept; account may be usage-limited).
+- Git. Shell scripts, if any remain, are pinned to LF via `.gitattributes`.
 
 ## Installation
 
-From Claude Code:
+### Grok Build
+
+```bash
+grok plugin marketplace add C:\dev\lider
+grok plugin install lider --trust
+grok plugin enable lider
+```
+
+### Claude Code
 
 ```
 /plugin marketplace add C:\dev\lider
 /plugin install lider@t50
 ```
+
+### OpenCode, Pi, Codex (skill discovery paths)
+
+```bash
+# From repo root — copies plugins/lider/skills into each host's layout
+python plugins/lider/scripts/install-skills.py
+python plugins/lider/scripts/install-skills.py --user   # also ~/.agents, ~/.pi, etc.
+set LIDER_PLUGIN_ROOT=C:\dev\lider\plugins\lider      # required so scripts resolve
+```
+
+| Host | Discovers skills from |
+|---|---|
+| OpenCode | `.opencode/skills`, `.agents/skills`, `.claude/skills` |
+| Pi | `.pi/skills`, `.agents/skills`, `~/.pi/agent/skills` |
+| Codex | `.codex/skills`, `~/.codex/skills` |
+
+### Plugin root in scripts
+
+```bash
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
+python "${LIDER}/scripts/rungraph.py" show
+```
+
+Engines are independent of host: a Grok session can still `agent-exec --engine pi`.

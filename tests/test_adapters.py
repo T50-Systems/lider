@@ -44,6 +44,7 @@ class TestRegistry:
 class TestStreamingDeclarations:
     @pytest.mark.parametrize("engine_id,streams", [
         ("codex", True), ("claude", True),
+        ("opencode", True), ("pi", True),
         ("grok", False), ("calvoproxy", False), ("generic", False),
     ])
     def test_each_adapter_declares_whether_its_engine_streams(self, engine_id, streams):
@@ -108,9 +109,35 @@ class TestMeasuredTraps:
         with pytest.raises(AdapterRefused):
             load("calvoproxy").argv("implement", None, "p", "", "")
 
+    def test_opencode_implement_uses_auto_and_json_format(self):
+        argv = load("opencode").argv("implement", "anthropic/claude-sonnet-4", "do it",
+                                     FINDINGS_SCHEMA, "o")
+        assert argv[:2] == ["/fake/bin", "run"]
+        assert "--format" in argv and argv[argv.index("--format") + 1] == "json"
+        assert "--auto" in argv
+        assert argv[argv.index("--model") + 1] == "anthropic/claude-sonnet-4"
+
+    def test_opencode_review_does_not_auto_approve_writes(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_PERMISSION", raising=False)
+        argv = load("opencode").argv("review", None, "review this", FINDINGS_SCHEMA, "o")
+        assert "--auto" not in argv
+        assert "OPENCODE_PERMISSION" in __import__("os").environ
+
+    def test_pi_review_is_read_only_tools_only(self):
+        argv = load("pi").argv("review", "anthropic/claude-sonnet-4", "review",
+                               FINDINGS_SCHEMA, "o")
+        assert "-p" in argv and "--mode" in argv and argv[argv.index("--mode") + 1] == "json"
+        assert argv[argv.index("--tools") + 1] == "read,grep,find,ls"
+        assert argv[-1] == "review"
+
+    def test_pi_implement_does_not_strip_write_tools(self):
+        argv = load("pi").argv("implement", None, "build", "", "")
+        assert "--tools" not in argv
+        assert argv[-1] == "build"
+
     def test_an_unknown_mode_is_refused_by_every_adapter(self):
         for engine_id in adapters.available():
-            with pytest.raises((AdapterRefused, KeyError, ValueError)):
+            with pytest.raises((AdapterRefused, KeyError, ValueError, NotImplementedError)):
                 load(engine_id).argv("teleport", None, "p", FINDINGS_SCHEMA, "o")
 
 

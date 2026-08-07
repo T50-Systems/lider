@@ -6,6 +6,64 @@ argument-hint: "<phase or feature description> [--impl opus|sonnet|fable|grok]"
 
 You act as the architect. Follow the flow in order; do not skip steps.
 
+## Harness (multi-host)
+
+The same skills and scripts run under **Claude Code**, **Grok Build**, **OpenCode**,
+**Codex**, and **Pi**. Resolve the plugin root once per shell:
+
+```bash
+LIDER="${LIDER_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}"
+if [ -z "$LIDER" ]; then
+  # From a checkout: python on plugins/lider/scripts finds the package root.
+  export PYTHONPATH="${PYTHONPATH}:$(pwd)/plugins/lider/scripts"
+  LIDER=$(python -c "from lider.root import plugin_root; print(plugin_root())")
+fi
+python "${LIDER}/scripts/rungraph.py" show
+```
+
+| Host | How skills load | Plugin root |
+|---|---|---|
+| **Claude Code** | marketplace plugin | `CLAUDE_PLUGIN_ROOT` |
+| **Grok Build** | marketplace plugin | `GROK_PLUGIN_ROOT` (+ Claude alias) |
+| **OpenCode** | `.opencode/skills` or `.agents/skills` | set `LIDER_PLUGIN_ROOT` (see `install-skills.py`) |
+| **Pi** | `.pi/skills` or `.agents/skills` | set `LIDER_PLUGIN_ROOT` |
+| **Codex** | `.codex/skills` or `~/.codex/skills` | set `LIDER_PLUGIN_ROOT` |
+
+Install skills into every discovery path from the plugin:
+
+```bash
+python plugins/lider/scripts/install-skills.py          # repo-local layouts
+python plugins/lider/scripts/install-skills.py --user   # also home dirs
+```
+
+**Engines** (what `agent-exec` / `agent-implement` can drive): `claude`, `grok`,
+`codex`, `opencode`, `pi`, `calvoproxy`, `generic`. Reviewer **family** must differ
+from implementer family — runtime id is the family for opencode/pi (not the model vendor).
+
+Never treat "I am host X, so engine X implements *and* reviews" as free — same-family
+review. The ledger will refuse it.
+
+## Inception is RECOMMENDED (not required)
+
+For non-trivial work, run **`/inception`** first (separate ledger, `--kind inception`),
+seal a handoff under `.lider/handoffs/`, then in this construction run:
+
+```bash
+python "${LIDER}/scripts/rungraph.py" import --handoff .lider/handoffs/<id>.json
+```
+
+**Flat path remains valid** for small tickets: `init → spec → implement` with no handoff.
+When you skip inception on a large feature, **say so** ("inception recommended; proceeding
+flat because …").
+
+**Strict mode** (`init --strict` or `LIDER_STRICT=1`): handoff **import is required**
+before `enter implement`. Challenge is required before inception `enter sealed`. Use strict
+when the user asks for it or the risk warrants no shortcuts.
+
+When promotion reaches a shared environment, prefer **`/operate`** (or at least `/preflight`
+before and `/verify` after). Construction `promote → effect` still works for feature ship;
+operations is the dedicated ledger when the work *is* touching shared state.
+
 ## Standing rule for every step: "I could not check" is NOT "it is fine"
 
 Every check in this flow — yours, the implementer's, the reviewer's — has **three** outcomes,
@@ -32,7 +90,8 @@ Everything below used to be prose you were trusted to follow. It is now a state 
 move through, so the rules hold even when the session that read them is gone:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/rungraph.py" <command> [--run <id>]
+python "${LIDER}/scripts/rungraph.py" <command> [--run <id>]
+# LIDER = ${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}  (see Harness)
 ```
 
 | Command | When |
@@ -95,13 +154,50 @@ orchestrator writes the criteria and declares which unit covers them, so the gat
 by never declaring a unit for it — a real and otherwise invisible error — and nothing more. Do
 not let a form check read as a substance check.
 
-### `next` — advisory, never authority
+### Loop vs graph — do not invent a second framework
 
-`rungraph.py next` reports what is eligible now and what blocks the rest. It **decides nothing
-and acts on nothing**; the model still launches the work and every transition still passes the
-guard. Its other job is to record how many units were eligible *concurrently*, so the question
-"should the ledger become a scheduler?" gets answered against measured parallelism rather than
-assumed parallelism.
+Lider is already **graph engineering** (durable ledger + legal edges). Keep the tiers straight:
+
+| Shape | When | Where it lives today |
+|---|---|---|
+| **Loop inside a node** | One act, bounded retry / converge | Adjudication rounds; fan-out `--until-dry` |
+| **Graph** | Multi-role edges, barriers (`join`), resume across sessions | `GRAPH` / units / inception / operations |
+| **Prose only** | No checkable predicate | Personas, design narrative — write it, do **not** add a node |
+
+Do **not** re-encode a loop as extra graph nodes, and do **not** port this ledger onto LangGraph (or similar). Change flow by editing the graph tables and guards in `rungraph.py`.
+
+### Artifact checklist (consume → produce)
+
+Guards already refuse missing pins. `rungraph.py show` prints an **artifacts:** block with the same facts. Construction (happy path):
+
+| Node / edge | Consumes | Produces / pin |
+|---|---|---|
+| `spec` | brief or imported handoff | spec file + hash (`spec --file`) |
+| `implement` | pinned spec, implementer assign, checks ok | working tree (no commit) |
+| `review` | diff + reviewer **other family** | findings JSON (`schemas/findings.schema.json`) |
+| `adjudicate` | findings | decisions + round; loop-back if not converging |
+| `verify` / `effect` | undecided-severe cleared | ternary `check` rows |
+| `plan` / `join` | criteria ↔ units mapping | unit subgraphs terminal before `join` |
+
+Inception and operations have their own tables in `/inception` and `/operate`. Coverage of criteria by units is **bookkeeping**, not proof of implementation.
+
+### `next` and `schedule` — advisory, never authority
+
+`rungraph.py next` reports what is eligible **right now** and what blocks the rest.  
+`rungraph.py schedule` turns unit `depends_on` into **waves of parallel work** (wave 0 =
+ready now; later waves assume earlier units finish). Both **decide nothing and act on
+nothing** — the model still launches the work and every `enter` still passes the guard.
+
+```bash
+python "${LIDER}/scripts/rungraph.py" schedule              # human plan
+python "${LIDER}/scripts/rungraph.py" schedule --format json
+python "${LIDER}/scripts/rungraph.py" schedule --format commands --max-width 2
+```
+
+`--format commands` prints git worktree + `enter implement --unit` lines so multi-agent /
+multi-worktree hosts do not invent the graph. Cap width when only N worktrees are comfortable.
+See skill `/schedule`. Metrics: `next` and `schedule` both append rows so
+`metrics-report --section parallelism` stays honest.
 
 `--force` overrides any single guard and is **recorded in the ledger as forced**. Use it when
 you have a real reason and say what it was; never to make a refusal go away quietly.
@@ -153,12 +249,12 @@ One reviewer is one opinion. For anything beyond a routine ticket, step 3 should
 
 ```bash
 # 1. N lenses at once, ideally across engine families
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> review \
+python "${LIDER}/scripts/fanout.py" --out <dir> review \
   --scope "<the diff / what to review>" \
   --lens correctness:claude:opus --lens security:grok --lens regression:claude:sonnet
 
 # 2. then put every BLOCKER/MAJOR to independent skeptics
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> refute \
+python "${LIDER}/scripts/fanout.py" --out <dir> refute \
   --round <dir>/round.json --votes 3 --engines claude,grok
 ```
 
@@ -171,7 +267,7 @@ earlier rounds had not already reported** — and each wave tells its lenses wha
 known, so a second round looks somewhere new instead of restating the first.
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> review   --scope "<the diff>" --until-dry 2 --max-rounds 5   --lens correctness:claude:opus --lens security:grok
+python "${LIDER}/scripts/fanout.py" --out <dir> review   --scope "<the diff>" --until-dry 2 --max-rounds 5   --lens correctness:claude:opus --lens security:grok
 ```
 
 If the `--max-rounds` cap is hit while findings are still arriving, the round is marked
@@ -211,12 +307,15 @@ That leaves two engine families for the cross-engine rule, which is what matters
 | Family | Engine | Role it can play |
 |---|---|---|
 | **anthropic** | `claude` (Fable / Opus / Sonnet / Haiku) | architect, implementer, reviewer |
-| **xai** | `grok` | reviewer (verified lockdown), challenger; implementer only with explicit approval |
-| **openrouter** | `calvoproxy` | contrast and bulk only — free models, no tools, **cannot implement** |
+| **xai** | `grok` | reviewer (lockdown rules), challenger; implementer with explicit write approval |
+| **openai** | `codex` | implementer/reviewer when account allows (usage-limited on some installs) |
+| **opencode** | `opencode` | implementer (`--auto`); reviewer via permission deny edit/write |
+| **pi** | `pi` | implementer; reviewer with read-only tool allowlist |
+| **openrouter** | `calvoproxy` | chat-only via local proxy — **no tools** (this adapter). Cheap models *with* tools → `--engine opencode` + that model |
 
-**Reviewer ≠ implementer family is still the rule**, and with this roster it has exactly one
-natural shape: **Claude implements, Grok reviews.** `rungraph.py assign` enforces it and will
-refuse a same-family pairing before the tokens are spent.
+**Reviewer ≠ implementer family is still the rule.** Natural pairs on this install:
+**Claude implements, Grok reviews** — or any two different families above.
+`rungraph.py assign` enforces it before tokens are spent.
 
 Core idea, restated for this roster: **Fable decides direction; Opus or Sonnet builds; Grok
 challenges and reviews; Fable adjudicates.**
@@ -258,9 +357,9 @@ Do not escalate by size — escalate by decision density. The implementer does n
 **Invoking an external implementer (Lider-owned, full access).** When the implementer is an external CLI rather than a Claude subagent, run it through this plugin's wrapper — never through another plugin's app-server path, which typically caps at `workspace-write` (no writes outside the repo, no network) and inherits the user's personal config. The wrapper runs the engine with full access in an isolated home where the adapter supports it: read/write across the filesystem, network on, no approvals, and none of the user's plugins/skills/hooks/memories bloating the run.
 
 ```
-python "${CLAUDE_PLUGIN_ROOT}/scripts/agent-implement.py" --engine <id> <timeout_s> <log> <done> <model> "<prompt>"
+python "${LIDER}/scripts/agent-implement.py" --engine <id> <timeout_s> <log> <done> <model> "<prompt>"
 ```
-- **Launch it DIRECTLY with the Bash tool's background mode — do NOT redirect or swallow its stdout.** The wrapper streams the engine's own output to `<log>` internally and prints a heartbeat to ITS stdout every ~10s; as a background task that heartbeat is what narrates the run in the panel. `<log>`/`<done>` are temp files in the session temp dir; the wrapper writes the final exit code to `<done>` when done.
+- **Launch it DIRECTLY in background — do NOT redirect or swallow its stdout.** The wrapper streams the engine's own output to `<log>` internally and prints a heartbeat to ITS stdout every ~10s; as a background task that heartbeat is what narrates the run. `<log>`/`<done>` are temp files in the session temp dir; the wrapper writes the final exit code to `<done>` when done.
 - The wrapper runs in the **current working directory** — `cd` into the intended repo/worktree first (an isolated engine home does not change where the task writes).
 - **Pass an explicit model** unless the adapter documents a safe default. Never a Fast/priority tier.
 

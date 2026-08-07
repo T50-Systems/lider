@@ -200,6 +200,137 @@ class TestAgentImplement:
         assert "mode: implement" in header and "WRITE ACCESS" in header
         assert "workdir:" in header
 
+    def test_a_timeout_is_124_and_names_itself(self, cli, engine, tmp_path):
+        self._repo(tmp_path)
+        engine("time.sleep(120)\n")
+        proc = cli("agent-implement.py", 3, tmp_path / "r.log", tmp_path / "done", "", "x")
+        assert proc.returncode == 124
+        assert "timeout" in proc.stderr
+
+    def test_a_detached_head_still_arms_the_checkpoint(self, cli, engine, tmp_path):
+        """Detached is a pin, not a dirty tree - recovery is still precise."""
+        self._repo(tmp_path)
+        subprocess.run(["git", "checkout", "--detach", "HEAD", "-q"], cwd=tmp_path)
+        engine("print('ok')\n")
+        log = tmp_path / "r.log"
+        cli("agent-implement.py", 30, log, tmp_path / "done", "", "x")
+        assert "auto-retry: enabled" in log.read_text(encoding="utf-8")
+        assert "DETACHED" in log.read_text(encoding="utf-8")
+
+    def test_a_transient_failure_restores_the_tree_before_retrying(
+            self, cli, engine, tmp_path, monkeypatch):
+        """The whole point of the checkpoint: half-written work is wiped, then
+        the implementer is allowed one more attempt. Without restore, the retry
+        would run over a dirty tree and the gate would have been a lie."""
+        self._repo(tmp_path)
+        # Fail once with a rate-limit signature (retry class), dirties f.txt, then
+        # succeed. LIDER_RETRIES is overridden by the checkpoint arm on a clean
+        # tree (default 1), so one retry is available without extra env.
+        engine(
+            "import os, sys\n"
+            "if not os.path.exists('attempted'):\n"
+            "    open('attempted', 'w').write('1')\n"
+            "    open('f.txt', 'w').write('half-written')\n"
+            "    print('error: 429 too many requests')\n"
+            "    sys.exit(1)\n"
+            "print('ok')\n"
+        )
+        # engine fixture pins LIDER_RETRIES=0 (no auto-retry for most tests);
+        # the checkpoint only arms a retry when the env allows it.
+        monkeypatch.setenv("LIDER_RETRIES", "1")
+        monkeypatch.setenv("LIDER_BACKOFF_S", "0")
+        log = tmp_path / "r.log"
+        done = tmp_path / "done"
+        proc = cli("agent-implement.py", 30, log, done, "", "build it")
+        assert proc.returncode == OK
+        assert done.read_text(encoding="utf-8").strip() == "0"
+        # The half-written content must not have survived the restore.
+        assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "one"
+        assert "retrying" in (proc.stdout + proc.stderr).lower()
+
+
+class TestCheckpointRestore:
+    """The restore path had zero coverage while being the safety of auto-retry.
+
+    arm() was tested through the wrapper log lines; restore() itself never ran.
+    These are the cases that decide whether a retry is safe or refused.
+    """
+
+    def _load(self):
+        import importlib.util
+        from conftest import SCRIPTS
+        path = os.path.join(SCRIPTS, "agent-implement.py")
+        name = "lidercli_agent_implement_unit"
+        if name in sys.modules:
+            return sys.modules[name]
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def _repo(self, tmp_path):
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path)
+        (tmp_path / "f.txt").write_text("one", encoding="utf-8")
+        (tmp_path / ".gitignore").write_text("*\n!f.txt\n!.gitignore\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path)
+        return tmp_path
+
+    def test_restore_without_arm_is_a_no_op_false(self):
+        impl = self._load()
+        assert impl.Checkpoint().restore() is False
+
+    def test_restore_returns_a_half_written_tree_to_the_checkpoint(self, tmp_path, monkeypatch):
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        impl = self._load()
+        log = tmp_path / "n.log"
+        log.write_text("", encoding="utf-8")
+        cp = impl.Checkpoint()
+        assert cp.arm(str(log)) >= 1
+        (tmp_path / "f.txt").write_text("half-written", encoding="utf-8")
+        assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "half-written"
+        assert cp.restore() is True
+        assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "one"
+
+    def test_restore_refuses_when_head_moved_to_another_branch(self, tmp_path, monkeypatch):
+        """Never destroy another branch's commits - the measured refusal rule."""
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        impl = self._load()
+        log = tmp_path / "n.log"
+        log.write_text("", encoding="utf-8")
+        cp = impl.Checkpoint()
+        assert cp.arm(str(log)) >= 1
+        subprocess.run(["git", "checkout", "-qb", "other"], cwd=tmp_path)
+        (tmp_path / "f.txt").write_text("on-other", encoding="utf-8")
+        assert cp.restore() is False
+        # The other branch's working edit is left alone.
+        assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "on-other"
+
+    def test_restore_refuses_when_the_repo_root_no_longer_matches(self, tmp_path, monkeypatch):
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        impl = self._load()
+        log = tmp_path / "n.log"
+        log.write_text("", encoding="utf-8")
+        cp = impl.Checkpoint()
+        assert cp.arm(str(log)) >= 1
+        cp.root = str(tmp_path / "not-the-repo")
+        assert cp.restore() is False
+
+    def test_git_oserror_is_a_failed_command_not_a_crash(self, monkeypatch):
+        """git missing from PATH must not raise into the implementer."""
+        impl = self._load()
+        def boom(*a, **k):
+            raise OSError("no git")
+        monkeypatch.setattr(subprocess, "run", boom)
+        rc, out = impl.git("status")
+        assert rc == 1 and out == ""
+
 
 class TestTheDataShims:
     """Five-line CLIs over tested library code - cheap to cover, cheap to break."""

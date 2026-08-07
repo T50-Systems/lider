@@ -81,7 +81,9 @@ against captured transcripts.
 | `codex` | agentic CLI | ✅ text grammar | ✅ full access | isolated `CODEX_HOME`; native `--output-schema` |
 | `claude` | agentic CLI | ✅ stream-json | ✅ | native `--json-schema` (inline, not a path); `--bare` only when `ANTHROPIC_API_KEY` is set |
 | `grok` | agentic CLI | ❌ (final JSON only) | ✅ `--yolo` | **does not stream** — startup watchdog disarmed; review locks down with permission **rules**, its tool denylist fails open |
-| `calvoproxy` | chat completion | ❌ | ⛔ refused | free models, no tools; contrast/bulk only |
+| `opencode` | agentic CLI | ❌ | ✅ `--auto` | `opencode run --format json`; review sets `OPENCODE_PERMISSION` deny write/edit |
+| `pi` | agentic CLI | ❌ | ✅ | `pi -p --mode json --no-session`; review uses `--tools read,grep,find,ls` only |
+| `calvoproxy` | HTTP chat (CalvoProxy) | ❌ | ⛔ refused | One OpenRouter completion via local proxy — **no tools**. Not “free models can’t use tools”: for tools + a cheap model use `--engine opencode` (or another agentic adapter) with that model pinned |
 | `generic` | any CLI | ❌ | ✅ | `LIDER_BIN` / `LIDER_ARGS_*`; the fallback for unknown ids |
 
 ## Measured traps worth not re-learning

@@ -188,3 +188,55 @@ class TestParallelismClosesTheSchedulerQuestion:
     def test_no_observations_yet_reports_nothing_rather_than_a_verdict(self, store, report):
         store({"kind": "run", "engine": "a", "exit": 0})
         assert report("parallelism")["parallelism"] == []
+
+
+class TestReportTextAndEdges:
+    """JSON was covered; the human table path and empty-section edges were not.
+
+    A report nobody can read from a terminal is not a report - and empty sections
+    must say so rather than crashing or inventing rows.
+    """
+
+    def test_text_mode_renders_every_section_as_a_table(self, store, report):
+        store({"kind": "run", "engine": "claude", "exit": 0, "cost_usd": 1.0,
+               "elapsed_s": 10, "model": "opus", "model_billed": "claude-opus-5"},
+              {"kind": "lens", "lens": "correctness", "engine": "claude",
+               "unique": 1, "shared": 0, "cost_usd": 0.5, "exit": 0},
+              {"kind": "round", "coverage": "complete",
+               "refutation": {"claims": 1, "upheld": 1, "refuted": 0,
+                              "undetermined": 0, "votes_per_claim": 3, "quorum": 2}},
+              {"kind": "eligibility", "run": "r", "units": 2, "width": 1})
+        proc = report(as_json=False)
+        assert proc.returncode == OK
+        text = proc.stdout
+        assert "event(s) from" in text
+        for name in ("routing", "lenses", "votes", "timing", "health",
+                     "drift", "parallelism"):
+            assert "== %s" % name in text
+        # Column headers from the routing table land in the text path.
+        assert "engine" in text and "ok_rate" in text
+
+    def test_text_mode_for_an_empty_section_says_no_data(self, store, report):
+        """drift with nothing mismatched must not invent a row or explode."""
+        store({"kind": "run", "engine": "claude", "exit": 0, "model": "opus",
+               "model_billed": "claude-opus-5"})
+        proc = report("drift", as_json=False)
+        assert proc.returncode == OK
+        assert "(no data yet)" in proc.stdout
+
+    def test_timing_with_only_non_run_events_is_empty(self, store, report):
+        store({"kind": "round", "coverage": "complete"})
+        assert report("timing")["timing"] == []
+
+    def test_votes_skips_rounds_that_have_no_refutation_block(self, store, report):
+        store({"kind": "round", "coverage": "complete"},
+              {"kind": "round", "coverage": "complete",
+               "refutation": {"claims": 2, "upheld": 1, "refuted": 1,
+                              "undetermined": 0, "votes_per_claim": 3, "quorum": 2}})
+        rows = report("votes")["votes"]
+        assert len(rows) == 1 and rows[0]["claims"] == 2
+
+    def test_a_single_named_section_does_not_emit_the_others(self, store, report):
+        store({"kind": "run", "engine": "a", "exit": 0, "elapsed_s": 1})
+        doc = report("health")
+        assert list(doc.keys()) == ["health"]

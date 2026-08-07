@@ -4,14 +4,21 @@
     "name": "T50-Systems"
   },
   "metadata": {
-    "description": "T50-Systems marketplace: workflow plugins for Claude Code and Grok Build."
+    "description": "T50-Systems marketplace: workflow plugins for Grok Build and Claude Code."
   },
   "plugins": [
     {
       "name": "lider",
       "source": "./plugins/lider",
       "description": "Lider multi-harness (Claude Code, Grok, OpenCode, Codex, Pi): inception/construction/operations, multi-engine adapters. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify.",
-      "version": "0.19.0"
+      "version": "0.19.0",
+      "keywords": [
+        "orchestration",
+        "pipeline",
+        "operations",
+        "pair-review",
+        "multi-engine"
+      ]
     }
   ]
 }

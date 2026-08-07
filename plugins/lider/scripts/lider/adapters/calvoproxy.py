@@ -1,9 +1,17 @@
-"""Free OpenRouter models via the local CalvoProxy.
+"""Local CalvoProxy as a *chat-completion* engine (not an agent).
 
-Not an agent: a single chat completion over HTTP. No tools, no filesystem, no
-turns. It is here because the contract should hold at the cheap end of the range
-too - offloading bulk or contrast work - and because an adapter that cannot
-implement should say so rather than pretend.
+This adapter is deliberately thin: one HTTP completion through the proxy
+(OpenRouter free/cheap profiles). It has **no tools and no filesystem** — that
+is a property of *this adapter*, not of free models in general.
+
+If you want a cheap model *with* tools (read/edit/bash), do not use
+`--engine calvoproxy`. Use an agentic adapter and pin the model there, e.g.:
+
+  agent-exec.py --engine opencode --model openrouter/<free-model> ...
+  agent-implement.py --engine opencode --model openrouter/<free-model> ...
+
+CalvoProxy stays the path for contrast/bulk text when you explicitly do not
+want tools.
 """
 import os
 
@@ -37,8 +45,9 @@ class CalvoProxyAdapter(Adapter):
     def argv(self, mode, model, prompt, schema, out):
         if mode == "implement":
             raise AdapterRefused(
-                "calvoproxy: implement mode is not supported - the proxy is a chat completion "
-                "with no tools or filesystem access. Pick another engine.")
+                "calvoproxy: this adapter is chat-only (no tools/filesystem). "
+                "For a free/cheap model WITH tools use --engine opencode "
+                "(or pi/claude/codex) and pin the model there.")
         if mode != "review":
             raise AdapterRefused("calvoproxy: unknown mode %r" % mode)
         # The model argument maps to the proxy PROFILE, not a model name.

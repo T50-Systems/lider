@@ -213,6 +213,20 @@ class TestGateAndResume:
         assert "implementer" in out and "anthropic" in out
         assert "spec:" in out                      # the pinned spec is recoverable
 
+    def test_show_lists_artifact_checklist(self, led):
+        """Resumed sessions should see missing pins before the next enter refusal."""
+        out = led("show").stdout
+        assert "artifacts:" in out
+        assert "spec pinned" in out
+        # implementer not assigned yet → row is missing, with a hint line
+        assert "implementer assigned" in out
+        assert "assign --role implementer" in out
+
+        led("enter", "spec")
+        led("assign", "--role", "implementer", "--engine", "claude", "--model", "opus")
+        out = led("show").stdout
+        assert "ok   implementer assigned" in out or "ok  implementer assigned" in out
+
     def test_the_ledger_survives_a_new_process(self, led):
         led("enter", "spec")
         assert "node: spec" in led("show").stdout   # a separate subprocess each time
