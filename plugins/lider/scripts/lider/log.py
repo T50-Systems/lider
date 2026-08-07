@@ -38,6 +38,30 @@ _PREFIX = threading.local()
 
 DEBUG = os.environ.get("LIDER_DEBUG") in ("1", "true", "yes")
 
+# MEASURED: an engine's own activity text contained "->" as U+2192, `emit` wrote it
+# to a cp1252 Windows console, and the UnicodeEncodeError propagated out of the
+# supervisor and killed the whole run - an expensive planning call lost to a
+# character. Narration must never be able to do that.
+#
+# We do NOT sanitise our own strings and hope: everything that reaches these
+# streams is ultimately engine-derived, so the guard belongs on the stream. Two
+# layers, because the first is not available everywhere.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
+
+def _safe(text):
+    """Render `text` in whatever the stream can actually encode."""
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(encoding, "strict")
+        return text
+    except (UnicodeEncodeError, LookupError):
+        return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+
 
 def set_prefix(prefix):
     """Tag this thread's output, so concurrent runs stay attributable."""
@@ -51,14 +75,14 @@ def _tag():
 def emit(message):
     """Live narration -> stdout, flushed. The operator is watching this."""
     with _LOCK:
-        sys.stdout.write("%s%s\n" % (_tag(), message))
+        sys.stdout.write(_safe("%s%s\n" % (_tag(), message)))
         sys.stdout.flush()
 
 
 def warn(message):
     """A problem worth reporting whether or not anyone asked for detail."""
     with _LOCK:
-        sys.stderr.write("%s%s\n" % (_tag(), message))
+        sys.stderr.write(_safe("%s%s\n" % (_tag(), message)))
         sys.stderr.flush()
 
 
@@ -67,7 +91,7 @@ def diag(message):
     if not DEBUG:
         return
     with _LOCK:
-        sys.stderr.write("%s[debug] %s\n" % (_tag(), message))
+        sys.stderr.write(_safe("%s[debug] %s\n" % (_tag(), message)))
         sys.stderr.flush()
 
 
