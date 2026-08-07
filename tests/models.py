@@ -132,11 +132,42 @@ class Event(BaseModel):
     node: str
 
 
+class HandoffRef(BaseModel):
+    """Pointer to a sealed inception handoff (construction import or seal out)."""
+    model_config = STRICT
+    path: str
+    sha256: str
+    id: Optional[str] = None
+    inception_run: Optional[str] = None
+    imported_at: Optional[int] = None
+    at: Optional[int] = None
+
+
+class InceptionHandoff(BaseModel):
+    """Operational seal under .lider/handoffs/<id>.json. Self-hashed."""
+    model_config = STRICT
+    kind: Literal["lider.inception.handoff"]
+    version: int
+    id: str
+    sealed_at: int
+    inception_run: str
+    strict: bool
+    frame: Spec
+    criteria: List[Criterion]
+    questions: List[Question]
+    units: List[Dict[str, Any]]       # slim unit rows, not full unit subgraphs
+    challenge: Dict[str, Any]
+    roles: Dict[str, Any]
+    sha256: str
+
+
 class Run(BaseModel):
     model_config = STRICT
     schema_version: int
     run_id: str
     title: str
+    kind: Literal["construction", "inception"] = "construction"
+    strict: bool = False
     created_at: int
     updated_at: int
     node: str
@@ -151,6 +182,9 @@ class Run(BaseModel):
     questions: List[Question]
     max_rounds: int
     events: List[Event]
+    handoff: Optional[HandoffRef] = None
+    handoff_out: Optional[HandoffRef] = None
+    inception_frame: Optional[Spec] = None
 
 
 class Usage(BaseModel):

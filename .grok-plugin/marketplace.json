@@ -1,0 +1,18 @@
+{
+  "name": "t50",
+  "owner": {
+    "name": "T50-Systems"
+  },
+  "metadata": {
+    "description": "T50-Systems marketplace: workflow plugins for Grok Build and Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "lider",
+      "source": "./plugins/lider",
+      "description": "Lider: engine-agnostic workflow orchestrator (preflight → closed spec → implementer → cross-engine pair-review → adjudication → PR promotion → effect verification). Skills: /pair-review, /preflight, /pipeline, /promote, /verify.",
+      "version": "0.15.0",
+      "keywords": ["orchestration", "pipeline", "pair-review", "multi-engine"]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # lider
 
-A Claude Code plugin that orchestrates the T50 engineering flow, **engine-agnostic**: an architect specs and adjudicates, an implementer executes, a *different* engine reviews, and the work is promoted through pull requests. The engines available on this install are **claude** (default) and **grok**; `calvoproxy` serves as a cheap third opinion. **Codex is not reachable on this account** - its binary is on `PATH` but every run fails on the usage limit, so its adapter is kept ready rather than routed to. Distributed via the `t50` marketplace.
+A **dual-harness** plugin (Grok Build **and** Claude Code) that orchestrates the T50 engineering flow, **engine-agnostic**: an architect specs and adjudicates, an implementer executes, a *different* engine reviews, and the work is promoted through pull requests. The engines available on this install are **claude** (default) and **grok**; `calvoproxy` serves as a cheap third opinion. **Codex is not reachable on this account** - its binary is on `PATH` but every run fails on the usage limit, so its adapter is kept ready rather than routed to. Distributed via the `t50` marketplace.
 
 The design goal is a flow that is **resilient, observable, and self-recovering**: you always know what each engine is doing, failures surface in minutes (not at a timeout), transient errors recover automatically and safely, and no orphaned processes are ever left behind.
 
@@ -8,9 +8,11 @@ For the full design and rationale, see [ARCHITECTURE.md](ARCHITECTURE.md). For c
 
 ## Skills
 
+- **`/inception <theme> [--strict]`** — **recommended** discovery run (separate ledger): frame, criteria, questions, units, optional challenge, seal to `.lider/handoffs/`. Not required for small tickets; **strict** requires challenge at seal and handoff import before construction implement.
 - **`/pair-review [scope]`** — independent review of the current diff with the second engine. Structured findings, hard timeout (no zombies), and a mandatory fallback to reviewing it ourselves if the second engine does not respond.
-- **`/pipeline <description> [--impl codex|opus|fable]`** — a full phase: closed architect spec → decision-density-routed background implementer → cross-engine pair-review → finding-by-finding adjudication → verification → commit → promotion. `--impl` pins the implementer and auto-assigns the *opposite* engine as reviewer; if you don't pin one, the pipeline asks which engine should implement.
+- **`/pipeline <description> [--impl opus|sonnet|fable|grok]`** — construction phase: closed build spec → implementer → cross-engine pair-review → adjudication → verification → commit → promotion. Prefer `/inception` first on non-trivial work (`import --handoff …`).
 - **`/promote [--yes] [title]`** — PR promotion: branch → PR to `dev` → merge → production gate → PR `dev`→`main` → merge → local sync.
+- **`/preflight`**, **`/verify`** — operating half before shared-state changes and after deploy.
 
 ## How it works
 
@@ -180,14 +182,46 @@ Behavior is tunable via environment variables (sane defaults; all validated). Th
 
 ## Requirements
 
-- Second review engine: **Codex CLI ≥ 0.144.1** on `PATH` (`codex --version`). Without it, `/pair-review` falls back to Claude.
-- Bash (Git Bash on Windows). Shell scripts are pinned to LF via `.gitattributes`.
+- **Python 3** on `PATH` (stdlib only at runtime).
+- At least two engine families for cross-engine review. On this install: **claude** + **grok** CLIs. Codex is optional (adapter kept; account may be usage-limited).
+- Git. Shell scripts, if any remain, are pinned to LF via `.gitattributes`.
 
 ## Installation
 
-From Claude Code:
+### Grok Build
+
+```bash
+grok plugin marketplace add C:\dev\lider          # or: owner/repo / git URL
+grok plugin install lider --trust
+grok plugin enable lider                          # if not already on
+# reload plugins (r in /plugins) or start a new session
+```
+
+Skills appear as `/pipeline`, `/pair-review`, `/preflight`, `/promote`, `/verify`
+(qualified as `/lider:…` if another plugin shares a name). The installed copy
+points at `plugins/lider`; local edits are live after reload.
+
+```bash
+grok plugin details lider
+grok plugin validate plugins/lider
+```
+
+### Claude Code
 
 ```
 /plugin marketplace add C:\dev\lider
 /plugin install lider@t50
 ```
+
+### Plugin root in scripts
+
+Both harnesses expose the install path. Skills resolve it as:
+
+```bash
+LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+python "${LIDER}/scripts/rungraph.py" show
+```
+
+Grok sets `GROK_PLUGIN_ROOT` and the `CLAUDE_PLUGIN_ROOT` alias; Claude Code sets
+`CLAUDE_PLUGIN_ROOT`. Runtime adapters stay the same either way — only the host
+that drives the skills changes.

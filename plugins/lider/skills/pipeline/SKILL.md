@@ -6,6 +6,50 @@ argument-hint: "<phase or feature description> [--impl opus|sonnet|fable|grok]"
 
 You act as the architect. Follow the flow in order; do not skip steps.
 
+## Harness (Grok Build **and** Claude Code)
+
+This plugin is dual-harness. The same skills, scripts and ledger run under **Grok Build**
+and **Claude Code**. Resolve the plugin root once per shell and reuse it:
+
+```bash
+LIDER="${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}"
+# If both are empty (rare: skill loaded outside a plugin install), derive it from
+# this skill's path: parent of skills/pipeline/ → plugins/lider.
+python "${LIDER}/scripts/rungraph.py" show
+```
+
+Grok sets `GROK_PLUGIN_ROOT` and also the `CLAUDE_PLUGIN_ROOT` alias; Claude Code sets
+`CLAUDE_PLUGIN_ROOT`. Prefer the form above so either host works.
+
+**What changes by host, and what does not:**
+
+| | Grok Build (this session is Grok) | Claude Code |
+|---|---|---|
+| You are | architect / orchestrator | architect / orchestrator |
+| Default implementer | Claude via `agent-implement.py --engine claude` (or a Grok subagent for judgment-light work you do yourself) | Claude subagent / `agent-implement` as the skill tables say |
+| Default reviewer | **other family** — if implementer was Claude → `agent-exec.py --engine grok`; if implementer was Grok → Claude reviews | same rule: **Claude implements, Grok reviews** is the natural pair |
+| Cross-engine rule | still enforced by `rungraph.py assign` | same |
+
+Never treat "I am Grok, so Grok should implement *and* review" as free — that is same-family
+review. The ledger will refuse it.
+
+## Inception is RECOMMENDED (not required)
+
+For non-trivial work, run **`/inception`** first (separate ledger, `--kind inception`),
+seal a handoff under `.lider/handoffs/`, then in this construction run:
+
+```bash
+python "${LIDER}/scripts/rungraph.py" import --handoff .lider/handoffs/<id>.json
+```
+
+**Flat path remains valid** for small tickets: `init → spec → implement` with no handoff.
+When you skip inception on a large feature, **say so** ("inception recommended; proceeding
+flat because …").
+
+**Strict mode** (`init --strict` or `LIDER_STRICT=1`): handoff **import is required**
+before `enter implement`. Challenge is required before inception `enter sealed`. Use strict
+when the user asks for it or the risk warrants no shortcuts.
+
 ## Standing rule for every step: "I could not check" is NOT "it is fine"
 
 Every check in this flow — yours, the implementer's, the reviewer's — has **three** outcomes,
@@ -32,7 +76,8 @@ Everything below used to be prose you were trusted to follow. It is now a state 
 move through, so the rules hold even when the session that read them is gone:
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/rungraph.py" <command> [--run <id>]
+python "${LIDER}/scripts/rungraph.py" <command> [--run <id>]
+# LIDER = ${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}  (see Harness)
 ```
 
 | Command | When |
@@ -153,12 +198,12 @@ One reviewer is one opinion. For anything beyond a routine ticket, step 3 should
 
 ```bash
 # 1. N lenses at once, ideally across engine families
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> review \
+python "${LIDER}/scripts/fanout.py" --out <dir> review \
   --scope "<the diff / what to review>" \
   --lens correctness:claude:opus --lens security:grok --lens regression:claude:sonnet
 
 # 2. then put every BLOCKER/MAJOR to independent skeptics
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> refute \
+python "${LIDER}/scripts/fanout.py" --out <dir> refute \
   --round <dir>/round.json --votes 3 --engines claude,grok
 ```
 
@@ -171,7 +216,7 @@ earlier rounds had not already reported** — and each wave tells its lenses wha
 known, so a second round looks somewhere new instead of restating the first.
 
 ```bash
-python "${CLAUDE_PLUGIN_ROOT}/scripts/fanout.py" --out <dir> review   --scope "<the diff>" --until-dry 2 --max-rounds 5   --lens correctness:claude:opus --lens security:grok
+python "${LIDER}/scripts/fanout.py" --out <dir> review   --scope "<the diff>" --until-dry 2 --max-rounds 5   --lens correctness:claude:opus --lens security:grok
 ```
 
 If the `--max-rounds` cap is hit while findings are still arriving, the round is marked
@@ -258,9 +303,9 @@ Do not escalate by size — escalate by decision density. The implementer does n
 **Invoking an external implementer (Lider-owned, full access).** When the implementer is an external CLI rather than a Claude subagent, run it through this plugin's wrapper — never through another plugin's app-server path, which typically caps at `workspace-write` (no writes outside the repo, no network) and inherits the user's personal config. The wrapper runs the engine with full access in an isolated home where the adapter supports it: read/write across the filesystem, network on, no approvals, and none of the user's plugins/skills/hooks/memories bloating the run.
 
 ```
-python "${CLAUDE_PLUGIN_ROOT}/scripts/agent-implement.py" --engine <id> <timeout_s> <log> <done> <model> "<prompt>"
+python "${LIDER}/scripts/agent-implement.py" --engine <id> <timeout_s> <log> <done> <model> "<prompt>"
 ```
-- **Launch it DIRECTLY with the Bash tool's background mode — do NOT redirect or swallow its stdout.** The wrapper streams the engine's own output to `<log>` internally and prints a heartbeat to ITS stdout every ~10s; as a background task that heartbeat is what narrates the run in the panel. `<log>`/`<done>` are temp files in the session temp dir; the wrapper writes the final exit code to `<done>` when done.
+- **Launch it DIRECTLY in background — do NOT redirect or swallow its stdout.** The wrapper streams the engine's own output to `<log>` internally and prints a heartbeat to ITS stdout every ~10s; as a background task that heartbeat is what narrates the run. `<log>`/`<done>` are temp files in the session temp dir; the wrapper writes the final exit code to `<done>` when done.
 - The wrapper runs in the **current working directory** — `cd` into the intended repo/worktree first (an isolated engine home does not change where the task writes).
 - **Pass an explicit model** unless the adapter documents a safe default. Never a Fast/priority tier.
 
