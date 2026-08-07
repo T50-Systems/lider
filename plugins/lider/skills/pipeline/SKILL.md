@@ -45,7 +45,11 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/rungraph.py" <command> [--run <id>]
 | `adjudicate --finding <id> --decision accept\|fix\|return\|respec\|reject\|escalate` | step 4, one per finding |
 | `enter <node>` | **every transition** — the guard |
 | `gate <node>` | "would this be allowed?" without moving |
-| `show` | **first thing to run when resuming** — node, spec hash, roles, open findings |
+| `criterion add --id AC1 --text "..."` / `criterion defer --id AC1 --reason "..."` | step 1, the acceptance criteria as ledger objects |
+| `question add --text "..." [--unit X]` / `question resolve --id q1 --status answered\|assumed --answer "..."` | any time an input is not established |
+| `unit add --id X --covers AC1,AC3 [--depends-on Y]` | step 1, once the spec is split |
+| `next` | **read-only** — what could run right now, and how wide the concurrency is |
+| `show` | **first thing to run when resuming** — node, spec text, roles, criteria, questions, units, open findings |
 
 Nodes: `spec → challenge? → preflight? → implement → review → adjudicate → verify → commit →
 promote → effect → done`, plus the loop-backs `adjudicate → implement` / `adjudicate → spec`
@@ -68,6 +72,36 @@ Four rules it enforces so you do not have to remember them:
   or when **every severe defect open last round is still open** — even if the raw count fell
   because two were fixed and one was introduced. Counting cannot tell those apart. `show`
   lists them under `STUCK`. Escalate instead (`enter escalated`).
+
+### The checkable half of Inception
+
+Most of what an upstream design phase produces — personas, component narratives, requirements
+prose — has **no checkable predicate**, so it stays prose you write. Three things do, and only
+those are machinery:
+
+- **The spec is re-verified, not just pinned.** `enter implement` re-hashes the file: changed
+  since you pinned it → refused (re-pin, or `--force`); unreadable → **`undetermined`**. This is
+  the only new guard that checks a declaration against a fact from *outside* the ledger.
+- **Open questions block as `undetermined`, not as failures.** An unanswered input is literally
+  an unestablished one. You may proceed on an assumption — but `--status assumed` **requires
+  `--answer`**: an assumption nobody recorded is indistinguishable from a fact nobody checked.
+- **Coverage is a checked relation.** `enter plan` refuses while a required criterion is covered
+  by no unit; a unit that covers nothing (once criteria exist) is unplanned scope; deferring a
+  criterion **requires a reason**, the same way a dropped unit makes a descope visible.
+
+**Read the limit, and repeat it when you report:** coverage is *self-attestation*. The same
+orchestrator writes the criteria and declares which unit covers them, so the gate verifies
+**bookkeeping consistency, not that anything was implemented**. It catches a requirement dropped
+by never declaring a unit for it — a real and otherwise invisible error — and nothing more. Do
+not let a form check read as a substance check.
+
+### `next` — advisory, never authority
+
+`rungraph.py next` reports what is eligible now and what blocks the rest. It **decides nothing
+and acts on nothing**; the model still launches the work and every transition still passes the
+guard. Its other job is to record how many units were eligible *concurrently*, so the question
+"should the ledger become a scheduler?" gets answered against measured parallelism rather than
+assumed parallelism.
 
 `--force` overrides any single guard and is **recorded in the ledger as forced**. Use it when
 you have a real reason and say what it was; never to make a refusal go away quietly.

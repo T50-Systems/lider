@@ -183,3 +183,35 @@ class TestClassification:
         assert sup.classify(125, 0) == "retry"    # watchdog
         assert sup.classify(127, 0) == "fatal"    # engine missing
         assert sup.classify(2, 0) == "fatal"      # bad usage
+
+
+class TestNarrationSurvivesAnyEngineText:
+    """MEASURED: an engine's activity text contained U+2192, `emit` wrote it to a
+    cp1252 Windows console, and the UnicodeEncodeError propagated out of the
+    supervisor and killed the run - an expensive planning call lost to a
+    character. Narration must never be able to do that.
+    """
+
+    @staticmethod
+    def _narrow(monkeypatch, with_reconfigure):
+        import io as _io
+        class Narrow(_io.TextIOWrapper):
+            def reconfigure(self, **kw):
+                if not with_reconfigure:
+                    raise AttributeError("no reconfigure here")
+                return super().reconfigure(**kw)
+        return Narrow
+
+    @pytest.mark.parametrize("with_reconfigure", [True, False])
+    def test_unencodable_output_is_degraded_not_fatal(self, monkeypatch, with_reconfigure):
+        import importlib
+        import io as _io
+        Narrow = self._narrow(monkeypatch, with_reconfigure)
+        monkeypatch.setattr(sys, "stdout", Narrow(_io.BytesIO(), encoding="cp1252"))
+        monkeypatch.setattr(sys, "stderr", Narrow(_io.BytesIO(), encoding="cp1252"))
+        from lider import log as log_module
+        importlib.reload(log_module)
+        # Arrows, check marks, accents - all real engine narration.
+        log_module.emit("exec: build \u2192 dist/ \u2713 caf\u00e9")
+        log_module.warn("warn \u2192 here")
+        importlib.reload(log_module)          # leave the module clean for other tests

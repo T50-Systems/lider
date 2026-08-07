@@ -38,6 +38,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lider import findings as fx    # noqa: E402
+from lider import metrics           # noqa: E402
 
 SCHEMA_VERSION = 1
 
@@ -224,6 +225,53 @@ def unfinished_units(state):
     return [u for u in state.get("units", []) if u["node"] not in UNIT_TERMINAL]
 
 
+def open_questions(state, unit_id=None):
+    """Questions still unanswered. An unanswered input is an UNESTABLISHED one."""
+    return [q for q in state.get("questions", [])
+            if q["status"] == "open" and (unit_id is None or q.get("unit") in (None, unit_id))]
+
+
+def uncovered_criteria(state):
+    """Required criteria that no unit claims to cover.
+
+    NOTE, and it is load-bearing: this checks the MAPPING, not the work. Both
+    sides of it are written by the same orchestrator, so unlike the family rule or
+    defect-identity convergence it verifies bookkeeping consistency rather than a
+    fact from outside. It still catches the common, currently invisible error -
+    dropping a requirement by never declaring a unit for it - but it must never be
+    presented as evidence that anything was implemented.
+    """
+    claimed = set()
+    for unit in state.get("units", []):
+        claimed.update(unit.get("covers") or [])
+    return [c for c in state.get("criteria", [])
+            if c["status"] == "required" and c["id"] not in claimed]
+
+
+def spec_drift(state):
+    """Compare the pinned spec against the file on disk.
+
+    ('ok', None) | ('changed', detail) | ('unreadable', detail) | ('unpinned', None)
+
+    The one new guard that checks a declaration against an EXTERNAL fact, which is
+    why it ranks above the rest: the pinned sha256 was stored and then never read
+    again, so an implementer could work from a file that no longer matched what
+    the ledger records was decided.
+    """
+    spec = state.get("spec")
+    if not spec:
+        return ("unpinned", None)
+    try:
+        with open(spec["path"], encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return ("unreadable", str(exc))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != spec["sha256"]:
+        return ("changed", "pinned %s, on disk %s" % (spec["sha256"][:12], digest[:12]))
+    return ("ok", None)
+
+
 # --- open findings ---------------------------------------------------------
 def open_findings(state):
     return [f for f in state["findings"] if f.get("decision") is None]
@@ -283,6 +331,8 @@ def cmd_init(args):
         "findings": [],
         "rounds": [],
         "units": [],
+        "criteria": [],
+        "questions": [],
         "max_rounds": args.max_rounds,
         "events": [],
     }
@@ -314,7 +364,8 @@ def cmd_unit(args):
                      ("blocked by " + ", ".join(blocked)) if blocked else ""))
         return OK
 
-    if find_unit(state, args.id) and not args.force:
+    existing = find_unit(state, args.id)
+    if existing and not args.force:
         print("rungraph: unit '%s' already exists" % args.id, file=sys.stderr)
         return REFUSED
     depends = [d.strip() for d in (args.depends_on or "").split(",") if d.strip()]
@@ -329,12 +380,146 @@ def cmd_unit(args):
         print("rungraph: unit '%s' cannot depend on itself" % args.id, file=sys.stderr)
         return REFUSED
 
-    state.setdefault("units", []).append(
-        new_unit(args.id, args.title, depends, args.max_rounds or state["max_rounds"]))
-    log_event(state, "unit", unit=args.id, depends_on=depends)
+    covers = [c.strip() for c in (args.covers or "").split(",") if c.strip()]
+    unknown_covers = [c for c in covers if not find_criterion(state, c)]
+    if unknown_covers and not args.force:
+        print("rungraph: unit '%s' claims undeclared criteri(a): %s. Declare them with "
+              "`criterion add` first." % (args.id, ", ".join(unknown_covers)), file=sys.stderr)
+        return REFUSED
+    if state.get("criteria") and not covers and not args.force:
+        # A unit that maps to nothing is unplanned scope. Only enforced once
+        # criteria exist, so a run that declares none is unaffected.
+        print("rungraph: unit '%s' covers no acceptance criterion. Pass --covers, or "
+              "--force if it is deliberately unmapped." % args.id, file=sys.stderr)
+        return REFUSED
+
+    if existing:
+        # MERGE, do not rebuild. Appending a duplicate left find_unit returning the
+        # first while unfinished_units counted both, so the join barrier could never
+        # open - but replacing with a fresh new_unit() was worse: a mid-flight unit
+        # snapped back to `pending` and lost its findings, rounds and roles. Update
+        # only what `unit add` is actually declaring.
+        unit = existing
+        unit["title"] = args.title or unit.get("title", "")
+        unit["depends_on"] = depends
+        unit["covers"] = covers
+        if args.max_rounds:
+            unit["max_rounds"] = args.max_rounds
+    else:
+        unit = new_unit(args.id, args.title, depends, args.max_rounds or state["max_rounds"])
+        unit["covers"] = covers
+        state.setdefault("units", []).append(unit)
+    log_event(state, "unit", unit=args.id, depends_on=depends, covers=covers,
+              replaced=bool(existing))
     save(root, rid, state)
-    print("unit '%s' declared%s" % (args.id,
-                                    (" (after %s)" % ", ".join(depends)) if depends else ""))
+    print("unit '%s' %s%s%s" % (args.id, "replaced" if existing else "declared",
+                                (" (after %s)" % ", ".join(depends)) if depends else "",
+                                (" covering %s" % ", ".join(covers)) if covers else ""))
+    return OK
+
+
+def find_criterion(state, cid):
+    for crit in state.get("criteria", []):
+        if crit["id"] == cid:
+            return crit
+    return None
+
+
+def cmd_criterion(args):
+    """Acceptance criteria as ledger objects, declared - never parsed from prose.
+
+    Parsing them out of the spec would be fragile and format-coupled, and would
+    make the ledger's view of the criteria depend on how the architect happened to
+    format a heading.
+    """
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if args.action == "list":
+        if not state.get("criteria"):
+            print("no acceptance criteria declared")
+            return OK
+        claimed = {}
+        for unit in state.get("units", []):
+            for cid in unit.get("covers") or []:
+                claimed.setdefault(cid, []).append(unit["id"])
+        for crit in state["criteria"]:
+            by = ", ".join(claimed.get(crit["id"], [])) or "NOT COVERED"
+            print("  %-8s %-9s %-40s %s" % (crit["id"], crit["status"],
+                                            crit["text"][:40], by))
+        return OK
+
+    if args.action == "add":
+        if not args.id or not args.text:
+            print("rungraph: criterion add needs --id and --text", file=sys.stderr)
+            return USAGE
+        if find_criterion(state, args.id) and not args.force:
+            print("rungraph: criterion '%s' already exists" % args.id, file=sys.stderr)
+            return REFUSED
+        state.setdefault("criteria", []).append({
+            "id": args.id, "text": args.text, "status": "required",
+            "reason": None, "at": int(time.time())})
+        log_event(state, "criterion", criterion=args.id)
+        save(root, rid, state)
+        print("criterion '%s' declared (required)" % args.id)
+        return OK
+
+    # defer
+    crit = find_criterion(state, args.id)
+    if crit is None:
+        print("rungraph: no criterion '%s'" % args.id, file=sys.stderr)
+        return USAGE
+    if not args.reason:
+        # Same rule as a dropped unit: descoping is legitimate, and must be
+        # VISIBLE rather than silent.
+        print("rungraph: deferring a criterion requires --reason", file=sys.stderr)
+        return REFUSED
+    crit["status"] = "deferred"
+    crit["reason"] = args.reason
+    log_event(state, "criterion", criterion=args.id, deferred=True)
+    save(root, rid, state)
+    print("criterion '%s' deferred: %s" % (args.id, args.reason))
+    return OK
+
+
+def cmd_question(args):
+    """Open questions, with the same three outcomes as everything else."""
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if args.action == "list":
+        if not state.get("questions"):
+            print("no open questions")
+            return OK
+        for q in state["questions"]:
+            print("  %-6s %-9s %-52s %s" % (q["id"], q["status"], q["text"][:52],
+                                            q.get("answer") or ""))
+        return OK
+
+    if args.action == "add":
+        if not args.text:
+            print("rungraph: question add needs --text", file=sys.stderr)
+            return USAGE
+        qid = "q%d" % (len(state.setdefault("questions", [])) + 1)
+        state["questions"].append({"id": qid, "text": args.text, "status": "open",
+                                   "answer": None, "unit": args.unit,
+                                   "at": int(time.time())})
+        log_event(state, "question", question=qid)
+        save(root, rid, state)
+        print("question %s recorded (open)" % qid)
+        return OK
+
+    # resolve
+    q = next((x for x in state.get("questions", []) if x["id"] == args.id), None)
+    if q is None:
+        print("rungraph: no question '%s'" % args.id, file=sys.stderr)
+        return USAGE
+    if args.status == "assumed" and not args.answer:
+        # You may proceed on an assumption - but only one that is written down.
+        print("rungraph: --status assumed requires --answer: an assumption nobody "
+              "recorded is indistinguishable from a fact nobody checked.", file=sys.stderr)
+        return REFUSED
+    q["status"] = args.status
+    q["answer"] = args.answer
+    log_event(state, "question", question=q["id"], status=args.status)
+    save(root, rid, state)
+    print("%s -> %s" % (q["id"], args.status))
     return OK
 
 
@@ -496,7 +681,7 @@ def cmd_adjudicate(args):
     return OK
 
 
-def adjudication_guard(scope, label, force):
+def adjudication_guard(scope, label, force):  # -> (code, message)
     """The loop rules, applied to a run or to one unit - they have one shape.
 
     Convergence is about WHICH defects are still open, not how many. Counting
@@ -504,190 +689,287 @@ def adjudication_guard(scope, label, force):
     for the third time" - both read as progress.
     """
     if len(scope["rounds"]) >= scope["max_rounds"] and not force:
-        print("rungraph: %sadjudication round limit reached (%d). Escalate to a human "
-              "instead of looping; `enter escalated`." % (label, scope["max_rounds"]),
-              file=sys.stderr)
-        return REFUSED
+        return REFUSED, ("%sadjudication round limit reached (%d). Escalate to a human "
+                         "instead of looping; `enter escalated`."
+                         % (label, scope["max_rounds"]))
     stuck = stuck_defects(scope)
     if stuck and not force:
         worst = stuck[0]
-        print("rungraph: %sdefect %s has survived %d rounds (%s). The implementer is not "
-              "fixing it; another pass is not the answer. Change the spec or "
-              "`enter escalated`."
-              % (label, worst["defect_id"], worst["rounds"], worst["summary"][:60]),
-              file=sys.stderr)
-        return REFUSED
+        return REFUSED, ("%sdefect %s has survived %d rounds (%s). The implementer is not "
+                         "fixing it; another pass is not the answer. Change the spec or "
+                         "`enter escalated`."
+                         % (label, worst["defect_id"], worst["rounds"], worst["summary"][:60]))
     if len(scope["rounds"]) >= 2:
         prev = set(scope["rounds"][-2].get("severe_defects") or [])
         last = set(scope["rounds"][-1].get("severe_defects") or [])
         if prev and not (prev - last) and not force:
-            print("rungraph: %snot converging - every BLOCKER/MAJOR open in round %d is "
-                  "STILL open in round %d (%s). Nothing was resolved, so another pass "
-                  "is unlikely to help; change the spec or escalate."
-                  % (label, len(scope["rounds"]) - 1, len(scope["rounds"]),
-                     ", ".join(sorted(last & prev)[:4])), file=sys.stderr)
-            return REFUSED
-    return OK
+            return REFUSED, ("%snot converging - every BLOCKER/MAJOR open in round %d is "
+                             "STILL open in round %d (%s). Nothing was resolved, so another "
+                             "pass is unlikely to help; change the spec or escalate."
+                             % (label, len(scope["rounds"]) - 1, len(scope["rounds"]),
+                                ", ".join(sorted(last & prev)[:4])))
+    return OK, None
 
 
-def enter_unit(state, unit, dest, force):
-    """Move one unit through its own subgraph."""
+def evaluate_unit(state, unit, dest, force):
+    """Would this unit transition be allowed? Returns (code, message). Mutates NOTHING."""
     cur = unit["node"]
     label = "[%s] " % unit["id"]
 
     if dest not in UNIT_GRAPH:
-        print("rungraph: %sunknown unit node '%s'. Known: %s"
-              % (label, dest, ", ".join(sorted(UNIT_GRAPH))), file=sys.stderr)
-        return USAGE
+        return USAGE, ("%sunknown unit node '%s'. Known: %s"
+                       % (label, dest, ", ".join(sorted(UNIT_GRAPH))))
     if dest not in UNIT_GRAPH[cur]:
-        print("rungraph: %s'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
-              % (label, cur, dest, cur, ", ".join(UNIT_GRAPH[cur]) or "(nowhere - terminal)"),
-              file=sys.stderr)
-        return REFUSED
+        return REFUSED, ("%s'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
+                         % (label, cur, dest, cur,
+                            ", ".join(UNIT_GRAPH[cur]) or "(nowhere - terminal)"))
 
-    # A unit may not start before what it depends on has finished. Without this
-    # the dependency is a comment, and the work lands in an order nobody chose.
-    if dest == "implement" and cur == "pending":
-        blocked = unblocked(state, unit)
-        if blocked and not force:
-            print("rungraph: %scannot start - depends on unfinished unit(s): %s"
-                  % (label, ", ".join(blocked)), file=sys.stderr)
-            return REFUSED
+    if dest == "implement" and not force:
+        # The run's checks gate a unit too. They did not: evaluate_run applied
+        # GATED and evaluate_unit never did, so in the decomposed path - which is
+        # THE path for a multi-unit phase - a failing preflight did not stop a
+        # unit from starting. Caught by the cross-family reviewer.
+        bad, unknown = blocking_checks(state)
+        if bad:
+            return REFUSED, ("%scannot start - failing check(s): %s"
+                             % (label, ", ".join(bad)))
+        if unknown:
+            return UNDETERMINED, ("%scannot start - check(s) UNDETERMINED: %s. This is not "
+                                  "a pass." % (label, ", ".join(unknown)))
+        # A unit may not start before what it depends on has finished. Otherwise
+        # the dependency is a comment and the work lands in an order nobody chose.
+        if cur == "pending":
+            blocked = unblocked(state, unit)
+            if blocked:
+                return REFUSED, ("%scannot start - depends on unfinished unit(s): %s"
+                                 % (label, ", ".join(blocked)))
+        pending = open_questions(state, unit["id"])
+        if pending:
+            return UNDETERMINED, (
+                "%s%d open question(s): %s. An unanswered input is an UNESTABLISHED "
+                "one - answer it, or record the assumption with `question resolve "
+                "--status assumed --answer ...`."
+                % (label, len(pending), ", ".join(q["id"] for q in pending)))
+        drift, detail = spec_drift(state)
+        if drift == "unpinned":
+            # Caught by the cross-family reviewer: this fell through to OK, so an
+            # unpinned spec passed the very guard meant to establish it. "Not
+            # established" rounded down to "fine" - in the code enforcing the rule.
+            return UNDETERMINED, ("%sno spec is pinned, so there is nothing to verify the "
+                                  "work against. Pin it with `spec --file`." % label)
+        if drift == "unreadable":
+            return UNDETERMINED, ("%scannot read the pinned spec (%s). This is not a "
+                                  "pass - re-pin it with `spec --file`." % (label, detail))
+        if drift == "changed":
+            return REFUSED, ("%sthe spec changed since it was pinned (%s). Re-pin it "
+                             "with `spec --file`, or --force." % (label, detail))
 
-    if dest in ("done",):
+    if dest == "done" and not force:
         still = open_severe(unit)
-        if still and not force:
-            print("rungraph: %scannot finish - %d undecided BLOCKER/MAJOR finding(s): %s"
-                  % (label, len(still), ", ".join(f["id"] for f in still)), file=sys.stderr)
-            return REFUSED
+        if still:
+            return REFUSED, ("%scannot finish - %d undecided BLOCKER/MAJOR finding(s): %s"
+                             % (label, len(still), ", ".join(f["id"] for f in still)))
 
     if dest == "adjudicate" and not force:
         impl = unit["roles"].get("implementer") or state["roles"].get("implementer")
         rev = unit["roles"].get("reviewer") or state["roles"].get("reviewer")
         if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
-            print("rungraph: %simplementer and reviewer are both %s - adjudicating a "
-                  "same-family review." % (label, impl["family"]), file=sys.stderr)
-            return REFUSED
+            return REFUSED, ("%simplementer and reviewer are both %s - adjudicating a "
+                             "same-family review." % (label, impl["family"]))
 
     if cur == "adjudicate" and dest == "implement":
-        code = adjudication_guard(unit, label, force)
+        code, message = adjudication_guard(unit, label, force)
         if code != OK:
-            return code
-
-    unit["node"] = dest
-    unit.setdefault("path", []).append(dest)
-    return OK
+            return code, message
+    return OK, None
 
 
-def cmd_enter(args):
-    """The guard. Every transition in the flow goes through here."""
-    root, (rid, state) = args.dir, need(args.dir, args.run)
-
-    # --- a unit's own subgraph -------------------------------------------
-    if args.unit:
-        try:
-            unit = scope_of(state, args.unit)
-        except KeyError as exc:
-            print("rungraph: %s" % exc, file=sys.stderr)
-            return USAGE
-        before = unit["node"]
-        code = enter_unit(state, unit, args.node, args.force)
-        if code == OK:
-            log_event(state, "enter", unit=args.unit, **{"from": before, "to": args.node,
-                                                         "forced": bool(args.force)})
-            save(root, rid, state)
-            print("[%s] %s -> %s%s" % (args.unit, before, args.node,
-                                       "  (FORCED)" if args.force else ""))
-        return code
-
-    # --- the run's own graph ---------------------------------------------
-    cur, dest = state["node"], args.node
+def evaluate_run(state, dest, force):
+    """Would this run transition be allowed? Returns (code, message). Mutates NOTHING."""
+    cur = state["node"]
 
     if dest not in GRAPH:
-        print("rungraph: unknown node '%s'. Known: %s"
-              % (dest, ", ".join(sorted(GRAPH))), file=sys.stderr)
-        return USAGE
-
+        return USAGE, ("unknown node '%s'. Known: %s" % (dest, ", ".join(sorted(GRAPH))))
     if dest not in GRAPH[cur]:
-        print("rungraph: '%s' -> '%s' is not an edge. From '%s' you may go to: %s"
-              % (cur, dest, cur, ", ".join(GRAPH[cur]) or "(nowhere - terminal)"),
-              file=sys.stderr)
-        return REFUSED
+        return REFUSED, ("'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
+                         % (cur, dest, cur, ", ".join(GRAPH[cur]) or "(nowhere - terminal)"))
 
-    # Gate 1: unresolved evidence. Undetermined blocks exactly like not-ok - that
-    # equivalence is the whole point, and it is enforced here once instead of
-    # being restated in every skill.
-    if dest in GATED:
+    if dest in GATED and not force:
         bad, unknown = blocking_checks(state)
-        if bad and not args.force:
-            print("rungraph: cannot enter '%s' - failing check(s): %s"
-                  % (dest, ", ".join(bad)), file=sys.stderr)
-            return REFUSED
-        if unknown and not args.force:
-            print("rungraph: cannot enter '%s' - check(s) UNDETERMINED: %s. "
-                  "This is not a pass. Establish them or say why you could not."
-                  % (dest, ", ".join(unknown)), file=sys.stderr)
-            return UNDETERMINED
+        if bad:
+            return REFUSED, ("cannot enter '%s' - failing check(s): %s"
+                             % (dest, ", ".join(bad)))
+        if unknown:
+            return UNDETERMINED, ("cannot enter '%s' - check(s) UNDETERMINED: %s. This is "
+                                  "not a pass. Establish them or say why you could not."
+                                  % (dest, ", ".join(unknown)))
 
-    # Gate 2: the JOIN barrier. A decomposed phase does not proceed while any unit
-    # is still open - that is what makes the decomposition mean something rather
-    # than being a list in a document.
-    if dest == "join" and not args.force:
-        pending = unfinished_units(state)
-        if not state.get("units"):
-            print("rungraph: cannot join - no units were declared. Use `unit add`, or "
-                  "run the flat path (spec -> implement).", file=sys.stderr)
-            return REFUSED
+    if dest == "implement" and not force:
+        pending = open_questions(state)
         if pending:
-            print("rungraph: cannot join - %d unit(s) still open: %s"
-                  % (len(pending), ", ".join("%s(%s)" % (u["id"], u["node"])
-                                             for u in pending)), file=sys.stderr)
-            return REFUSED
+            return UNDETERMINED, (
+                "%d open question(s): %s. An unanswered input is an UNESTABLISHED one - "
+                "answer it, or record the assumption with `question resolve --status "
+                "assumed --answer ...`." % (len(pending), ", ".join(q["id"] for q in pending)))
+        drift, detail = spec_drift(state)
+        if drift == "unpinned":
+            return UNDETERMINED, ("no spec is pinned, so there is nothing to verify the work "
+                                  "against. Pin it with `spec --file`.")
+        if drift == "unreadable":
+            return UNDETERMINED, ("cannot read the pinned spec (%s). This is not a pass - "
+                                  "re-pin it with `spec --file`." % detail)
+        if drift == "changed":
+            return REFUSED, ("the spec changed since it was pinned (%s). The implementer "
+                             "would be building from something the ledger never recorded a "
+                             "decision about. Re-pin with `spec --file`, or --force." % detail)
 
-    # Gate 3: open severe findings must not walk past judgment. `verify` is in
-    # this list because leaving adjudication with undecided BLOCKER/MAJOR findings
-    # is exactly the half-finished adjudication the node exists to prevent -
-    # without it, a run reaches verification with its worst findings unread.
-    # Units are included: a phase must not verify over a unit's unread findings.
-    if dest in ("verify", "commit", "promote", "effect", "done"):
+    if dest == "plan" and not force:
+        # Coverage. Bookkeeping only - see uncovered_criteria() - and the refusal
+        # says so, because a form check must never read as a substance check.
+        missing = uncovered_criteria(state)
+        if missing:
+            return REFUSED, (
+                "cannot plan - %d required criterion/criteria covered by no unit: %s. "
+                "Declare a unit with --covers, or `criterion defer --reason ...`. NOTE: "
+                "this checks the MAPPING only, not that any unit implements anything."
+                % (len(missing), ", ".join(c["id"] for c in missing)))
+
+    if dest == "join" and not force:
+        if not state.get("units"):
+            return REFUSED, ("cannot join - no units were declared. Use `unit add`, or run "
+                             "the flat path (spec -> implement).")
+        pending = unfinished_units(state)
+        if pending:
+            return REFUSED, ("cannot join - %d unit(s) still open: %s"
+                             % (len(pending), ", ".join("%s(%s)" % (u["id"], u["node"])
+                                                        for u in pending)))
+
+    if dest in ("verify", "commit", "promote", "effect", "done") and not force:
         still = open_severe(state)
         for unit in state.get("units", []):
             still += [dict(f, id="%s/%s" % (unit["id"], f["id"])) for f in open_severe(unit)]
-        if still and not args.force:
-            print("rungraph: cannot enter '%s' - %d undecided BLOCKER/MAJOR finding(s): %s"
-                  % (dest, len(still), ", ".join(f["id"] for f in still)), file=sys.stderr)
-            return REFUSED
+        if still:
+            return REFUSED, ("cannot enter '%s' - %d undecided BLOCKER/MAJOR finding(s): %s"
+                             % (dest, len(still), ", ".join(f["id"] for f in still)))
 
-    # Gate 4: the review must have been done by a different engine family.
-    if dest == "adjudicate" and not args.force:
+    if dest == "adjudicate" and not force:
         impl, rev = state["roles"].get("implementer"), state["roles"].get("reviewer")
         if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
-            print("rungraph: implementer and reviewer are both %s - adjudicating a "
-                  "same-family review." % impl["family"], file=sys.stderr)
-            return REFUSED
+            return REFUSED, ("implementer and reviewer are both %s - adjudicating a "
+                             "same-family review." % impl["family"])
 
-    # Gate 5: the adjudication loop. Bounded AND required to converge.
     if cur == "adjudicate" and dest in ("implement", "spec"):
-        code = adjudication_guard(state, "", args.force)
-        if code != OK:
-            return code
+        return adjudication_guard(state, "", force)
+    return OK, None
 
-    state["node"] = dest
-    state["path"].append(dest)
-    log_event(state, "enter", **{"from": cur, "to": dest, "forced": bool(args.force)})
+
+def evaluate(state, dest, unit_id, force):
+    """The single guard chain. Pure: no writes, no side effects, safe to ask twice."""
+    if unit_id:
+        try:
+            unit = scope_of(state, unit_id)
+        except KeyError as exc:
+            return USAGE, str(exc)
+        return evaluate_unit(state, unit, dest, force)
+    return evaluate_run(state, dest, force)
+
+
+def cmd_enter(args):
+    """The guard, applied. Every transition in the flow goes through here."""
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    code, message = evaluate(state, args.node, args.unit, args.force)
+    if code != OK:
+        print("rungraph: %s" % message, file=sys.stderr)
+        return code
+
+    if args.unit:
+        unit = scope_of(state, args.unit)
+        before = unit["node"]
+        unit["node"] = args.node
+        unit.setdefault("path", []).append(args.node)
+        log_event(state, "enter", unit=args.unit,
+                  **{"from": before, "to": args.node, "forced": bool(args.force)})
+        save(root, rid, state)
+        print("[%s] %s -> %s%s" % (args.unit, before, args.node,
+                                   "  (FORCED)" if args.force else ""))
+        return OK
+
+    before = state["node"]
+    state["node"] = args.node
+    state["path"].append(args.node)
+    log_event(state, "enter", **{"from": before, "to": args.node, "forced": bool(args.force)})
     save(root, rid, state)
-    print("%s -> %s%s" % (cur, dest, "  (FORCED)" if args.force else ""))
+    print("%s -> %s%s" % (before, args.node, "  (FORCED)" if args.force else ""))
     return OK
 
 
 def cmd_gate(args):
-    """Ask whether a move is allowed without making it. Same codes as `enter`."""
-    root, (rid, state) = args.dir, need(args.dir, args.run)
-    snapshot = json.loads(json.dumps(state))
-    args.force = False
-    code = cmd_enter(args)
-    save(root, rid, snapshot)   # `gate` never advances the run
+    """Ask whether a move would be allowed. Same codes as `enter`, and NO write.
+
+    It used to snapshot the state, let cmd_enter commit, then restore - which
+    destroyed any write that landed in between and bumped `updated_at` on a
+    *query*, perturbing resolve_run's "most recently updated run". A dry run that
+    mutates is not a dry run.
+    """
+    _root, (_rid, state) = args.dir, need(args.dir, args.run)
+    code, message = evaluate(state, args.node, args.unit, False)
+    if code == OK:
+        if args.unit:
+            print("[%s] %s -> %s: allowed"
+                  % (args.unit, scope_of(state, args.unit)["node"], args.node))
+        else:
+            print("%s -> %s: allowed" % (state["node"], args.node))
+    else:
+        print("rungraph: %s" % message, file=sys.stderr)
     return code
+
+
+def cmd_next(args):
+    """What could run right now. LEDGER-read-only, and deliberately advisory.
+
+    Precise about what it does not touch: it never writes run.json. It DOES append
+    one eligibility row to metrics.jsonl - that is its second job - so calling it
+    "read-only" without qualification overstated the purity. Flagged in review.
+
+    This is NOT a scheduler and must not become one by accident: it reports what
+    the graph permits, it does not decide or act. Its real job is to record how
+    many units were eligible CONCURRENTLY, so that any future decision about
+    building a scheduler rests on measured parallelism rather than assumed
+    parallelism. Nobody has yet looked at whether real runs even have units
+    eligible at the same time.
+    """
+    _root, (rid, state) = args.dir, need(args.dir, args.run)
+    units = []
+    for unit in state.get("units", []):
+        blocked = unblocked(state, unit)
+        eligible = (unit["node"] == "pending" and not blocked
+                    and evaluate_unit(state, unit, "implement", False)[0] == OK)
+        units.append({"id": unit["id"], "node": unit["node"], "eligible": eligible,
+                      "blocked_by": blocked})
+    width = len([u for u in units if u["eligible"]])
+    report = {"run": rid, "node": state["node"],
+              "legal_moves": list(GRAPH[state["node"]]), "units": units,
+              "concurrency_width": width}
+
+    # Never raises, so measuring cannot break a run.
+    metrics.record(args.dir, "eligibility", run=rid, node=state["node"],
+                   units=len(units), width=width)
+
+    if args.json:
+        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return OK
+    print("node: %s      legal moves: %s"
+          % (state["node"], ", ".join(report["legal_moves"]) or "(terminal)"))
+    if not units:
+        print("no units; this run is a single flat unit")
+        return OK
+    for unit in units:
+        mark = "READY" if unit["eligible"] else ("blocked by " + ", ".join(unit["blocked_by"])
+                                                 if unit["blocked_by"] else unit["node"])
+        print("  %-14s %-11s %s" % (unit["id"], unit["node"], mark))
+    print("units that could run concurrently right now: %d" % width)
+    return OK
 
 
 def cmd_show(args):
@@ -715,6 +997,20 @@ def cmd_show(args):
         for name, chk in state["checks"].items():
             mark = {"ok": "ok ", "not-ok": "NOT", "undetermined": "?? "}[chk["verdict"]]
             print("  [%s] %-24s %s" % (mark, name, chk["evidence"][:60]))
+    if state.get("questions"):
+        pending = open_questions(state)
+        assumed = [q for q in state["questions"] if q["status"] == "assumed"]
+        print("questions: %d open, %d assumed" % (len(pending), len(assumed)))
+        for q in state["questions"]:
+            if q["status"] != "answered":
+                print("  %-6s %-9s %s" % (q["id"], q["status"], q["text"][:60]))
+    if state.get("criteria"):
+        missing = uncovered_criteria(state)
+        print("criteria: %d, %d required and uncovered" % (len(state["criteria"]), len(missing)))
+        for crit in state["criteria"]:
+            print("  %-8s %-9s %s" % (crit["id"], crit["status"], crit["text"][:56]))
+        if missing:
+            print("  (coverage is a MAPPING check, not evidence anything was implemented)")
     if state.get("units"):
         pending = unfinished_units(state)
         print("units: %d, %d still open" % (len(state["units"]), len(pending)))
@@ -795,12 +1091,36 @@ def build_parser():
     q.add_argument("--evidence")
     q.set_defaults(fn=cmd_check)
 
+    q = sub.add_parser("criterion", help="declare acceptance criteria, defer one, or list")
+    q.add_argument("action", choices=["add", "defer", "list"])
+    q.add_argument("--id")
+    q.add_argument("--text")
+    q.add_argument("--reason", help="required when deferring: a descope must be visible")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_criterion)
+
+    q = sub.add_parser("question", help="record an open question, resolve one, or list")
+    q.add_argument("action", choices=["add", "resolve", "list"])
+    q.add_argument("--id")
+    q.add_argument("--text")
+    q.add_argument("--status", choices=["answered", "assumed"])
+    q.add_argument("--answer")
+    q.add_argument("--unit")
+    q.set_defaults(fn=cmd_question)
+
+    q = sub.add_parser("next",
+                       help="what could run right now (never writes the ledger; records "
+                            "one eligibility row to metrics.jsonl)")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(fn=cmd_next)
+
     q = sub.add_parser("unit", help="declare a unit of work, or list them")
     q.add_argument("action", choices=["add", "list"])
     q.add_argument("--id")
     q.add_argument("--title", default="")
     q.add_argument("--depends-on", dest="depends_on",
                    help="comma-separated ids that must finish first")
+    q.add_argument("--covers", help="comma-separated acceptance criteria this unit maps to")
     q.add_argument("--max-rounds", type=int)
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_unit)
