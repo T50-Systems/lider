@@ -16,6 +16,10 @@ class GrokAdapter(Adapter):
     # streaming format is confirmed later, add its grammar and flip this - not
     # before.
     has_inflight = False
+    # MEASURED: `--output-format json` writes NOTHING until the run ends - a real
+    # review was killed at 129s with log_bytes 0 by the startup watchdog. Declaring
+    # this disarms that watchdog; the hard timeout stays the bound.
+    streams = False
 
     def locate(self):
         self.bin = shutil.which("grok")

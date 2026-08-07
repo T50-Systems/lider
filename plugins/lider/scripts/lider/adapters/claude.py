@@ -17,6 +17,7 @@ class ClaudeAdapter(Adapter):
     # state comes from STRUCTURED markers rather than a text grammar. Verified
     # against a real transcript: tool_use opens, tool_result closes, result ends.
     has_inflight = True
+    streams = True            # stream-json: one event per line, from the first turn
     native_schema = True      # --json-schema is enforced by the CLI
 
     def locate(self):

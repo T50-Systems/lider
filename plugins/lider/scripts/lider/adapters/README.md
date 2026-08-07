@@ -15,6 +15,7 @@ conservative default.
 |---|---|---|
 | `id` | module name, and the value of `--engine` | required |
 | `has_inflight` | `True` only if `inflight` can really distinguish a running command from an idle engine | `False` |
+| `streams` | `True` if the engine emits output **progressively**. `None` infers it from `has_inflight` | `None` |
 | `native_schema` | `True` if the engine enforces the JSON schema itself | `False` (validate locally) |
 | `locate()` | set `self.bin`; return `False` if the engine is absent | look up `id` on `PATH` |
 | `isolate(anchor_dir)` | keep the run out of the user's personal config for this engine | no-op |
@@ -29,6 +30,27 @@ conservative default.
 Raise `AdapterRefused` when a mode is impossible for the engine (see
 `calvoproxy`, which has no filesystem). The wrapper reports that as `exit 2`
 rather than running something that would quietly do nothing.
+
+## Two watchdogs, two disarms
+
+`has_inflight` and `streams` answer different questions, and each disarms a different watchdog:
+
+| Adapter says | Runtime disarms | Because |
+|---|---|---|
+| `has_inflight = False` | the **stall** watchdog | mid-run silence cannot be told from a long command |
+| `streams = False` | the **startup** watchdog | early silence cannot be told from a dead launch |
+
+**MEASURED:** `grok --output-format json` emits one object at the very end and writes nothing
+before it. With the startup watchdog armed, that is not a health check — it is a guarantee that
+any Grok run longer than the startup window is killed. A real review died at 129 s with
+`exit 125` and an empty log.
+
+`status.json` publishes both as `stall_watchdog` and `startup_watchdog`, so a reader never
+mistakes an unwatched run for a watched one.
+
+**Known limit** (raised by a cross-family review of this very change): `streams = None` infers
+from `has_inflight`, so an engine that *does* stream but never got an in-flight grammar written
+also loses its startup watchdog. Declare `streams = True` explicitly on such an adapter.
 
 ## The rule that shapes the defaults
 
@@ -58,7 +80,7 @@ against captured transcripts.
 |---|---|---|---|---|
 | `codex` | agentic CLI | ✅ text grammar | ✅ full access | isolated `CODEX_HOME`; native `--output-schema` |
 | `claude` | agentic CLI | ✅ stream-json | ✅ | native `--json-schema` (inline, not a path); `--bare` only when `ANTHROPIC_API_KEY` is set |
-| `grok` | agentic CLI | ❌ (final JSON only) | ✅ `--yolo` | review locks down with permission **rules** — its tool denylist fails open |
+| `grok` | agentic CLI | ❌ (final JSON only) | ✅ `--yolo` | **does not stream** — startup watchdog disarmed; review locks down with permission **rules**, its tool denylist fails open |
 | `calvoproxy` | chat completion | ❌ | ⛔ refused | free models, no tools; contrast/bulk only |
 | `generic` | any CLI | ❌ | ✅ | `LIDER_BIN` / `LIDER_ARGS_*`; the fallback for unknown ids |
 
@@ -77,6 +99,9 @@ Each of these cost a debugging cycle and is now encoded in the adapter it belong
 - **`subprocess` cannot exec a shebang script on Windows**, and plain `"bash"`
   resolves to the WSL shim in `System32`, which cannot see Windows paths. Use
   `runtime.interpreter_for()` for any script-based engine.
+- **Grok wraps its answer in prose**: `{"text": "<prose> ```json {...} ``` "}`. The
+  extractor now finds a fenced block anywhere inside a string, not only one that
+  spans the whole of it.
 
 ## Writing a new one
 
