@@ -1,0 +1,23 @@
+# Development only. NOTHING here is needed to run the plugin.
+#
+# The runtime deliberately imports stdlib alone: lider is distributed through a
+# marketplace and installed by people who should not have to install anything to
+# use it. `rungraph.py` states that constraint explicitly, and it is why its
+# hundreds of tests run without an engine, a network, or a package.
+#
+# These are the tools that hold the runtime to its word.
+
+pytest>=8            # the suite
+pytest-cov>=5        # the 90% floor in .coveragerc, enforced as a gate
+
+# The durable formats - run.json, status.json, metrics.jsonl - are written as
+# plain dicts and validated by nothing at runtime. tests/models.py declares them
+# as strict pydantic models and checks them against what the code ACTUALLY wrote,
+# so a field added, renamed or retyped fails a test instead of surfacing in
+# someone's resumed session a week later. The models never ship.
+pydantic>=2
+
+# OPTIONAL AT RUNTIME, not required: lider/validate.py uses jsonschema when it is
+# present and falls back to a built-in checker when it is not. Both paths are
+# tested, because the fallback is the one most users hit.
+jsonschema>=4
