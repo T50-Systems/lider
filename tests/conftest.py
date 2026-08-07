@@ -11,6 +11,8 @@ Two rules this suite holds itself to:
   refuses to break. A test here should be readable as "this is what went wrong
   once, and here is the shape it must never take again".
 """
+import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -79,13 +81,60 @@ def run_exec(tmp_path, scripts_dir):
     return run
 
 
+def _load_script(scripts_dir, script):
+    """Import a CLI script by path, because most of them have a dash in the name."""
+    name = "lidercli_" + script.replace("-", "_").replace(".py", "")
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, os.path.join(scripts_dir, script))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Result(object):
+    """The CompletedProcess shape the tests already read, from an in-process call."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 @pytest.fixture
-def cli(scripts_dir, tmp_path):
-    """Run one of the plugin's CLI scripts and return the CompletedProcess."""
+def cli(scripts_dir, tmp_path, monkeypatch):
+    """Invoke a CLI script's `main()` IN PROCESS and return a CompletedProcess-alike.
+
+    These used to be real subprocesses. Two reasons they are not any more, and the
+    second is the one that mattered:
+
+    * **Speed.** A subprocess per assertion made the ledger tests the slowest part
+      of the suite for no extra signal - `main()` IS the boundary; only the
+      `sys.exit()` wrapper around it is outside.
+    * **Measurability.** Coverage cannot see into a subprocess without a
+      sitecustomize hook that proved unreliable here, so the whole CLI surface -
+      the majority of this codebase - reported as 0% while being thoroughly
+      exercised. A number that wrong is worse than no number.
+
+    A handful of tests still spawn real processes on purpose (the supervisor and
+    fan-out suites), because there the process boundary IS the thing under test.
+    """
     def run(script, *args, **kwargs):
-        return subprocess.run(
-            [sys.executable, os.path.join(scripts_dir, script)] + [str(a) for a in args],
-            capture_output=True, text=True, cwd=kwargs.get("cwd", str(tmp_path)))
+        module = _load_script(scripts_dir, script)
+        argv = [script] + [str(a) for a in args]
+        out, err = io.StringIO(), io.StringIO()
+        cwd = kwargs.get("cwd", str(tmp_path))
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "argv", argv)
+            patch.setattr(sys, "stdout", out)
+            patch.setattr(sys, "stderr", err)
+            patch.chdir(cwd)
+            try:
+                code = module.main()
+            except SystemExit as exc:          # argparse errors exit rather than return
+                code = exc.code if isinstance(exc.code, int) else 2
+        return Result(code if code is not None else 0, out.getvalue(), err.getvalue())
     return run
 
 
