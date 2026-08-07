@@ -197,6 +197,8 @@ class Run(BaseModel):
     events: List[Event]
     handoff: Optional[HandoffRef] = None
     handoff_out: Optional[HandoffRef] = None
+    # Pointer from apply-plan (session log → ledger). Not a sealed handoff.
+    session_plan: Optional[Dict[str, Any]] = None
     inception_frame: Optional[Spec] = None
     target: Optional[OpsTarget] = None
 
