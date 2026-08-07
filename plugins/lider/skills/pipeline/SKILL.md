@@ -154,13 +154,23 @@ orchestrator writes the criteria and declares which unit covers them, so the gat
 by never declaring a unit for it — a real and otherwise invisible error — and nothing more. Do
 not let a form check read as a substance check.
 
-### `next` — advisory, never authority
+### `next` and `schedule` — advisory, never authority
 
-`rungraph.py next` reports what is eligible now and what blocks the rest. It **decides nothing
-and acts on nothing**; the model still launches the work and every transition still passes the
-guard. Its other job is to record how many units were eligible *concurrently*, so the question
-"should the ledger become a scheduler?" gets answered against measured parallelism rather than
-assumed parallelism.
+`rungraph.py next` reports what is eligible **right now** and what blocks the rest.  
+`rungraph.py schedule` turns unit `depends_on` into **waves of parallel work** (wave 0 =
+ready now; later waves assume earlier units finish). Both **decide nothing and act on
+nothing** — the model still launches the work and every `enter` still passes the guard.
+
+```bash
+python "${LIDER}/scripts/rungraph.py" schedule              # human plan
+python "${LIDER}/scripts/rungraph.py" schedule --format json
+python "${LIDER}/scripts/rungraph.py" schedule --format commands --max-width 2
+```
+
+`--format commands` prints git worktree + `enter implement --unit` lines so multi-agent /
+multi-worktree hosts do not invent the graph. Cap width when only N worktrees are comfortable.
+See skill `/schedule`. Metrics: `next` and `schedule` both append rows so
+`metrics-report --section parallelism` stays honest.
 
 `--force` overrides any single guard and is **recorded in the ledger as forced**. Use it when
 you have a real reason and say what it was; never to make a refusal go away quietly.

@@ -1,5 +1,5 @@
 {
   "name": "lider",
-  "version": "0.17.0",
-  "description": "Lider multi-harness (Claude Code, Grok, OpenCode, Codex, Pi): inception/construction/operations ledgers, multi-engine adapters. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify."
+  "version": "0.18.0",
+  "description": "Lider multi-harness (Claude Code, Grok, OpenCode, Codex, Pi): inception/construction/operations ledgers, multi-engine adapters. Skills: /inception, /pipeline, /operate, /pair-review, /preflight, /promote, /verify; parallel unit schedule."
 }
