@@ -6,11 +6,11 @@ doctrine written in a SKILL.md. Read it as: "here is what the table in the skill
 should say, according to what actually happened."
 
   routing     which engine to send work to
-  reviewers   which engine's findings are worth adjudicating
-  lenses      which lenses earn their slot in a fan-out
+  lenses      which lenses earn their slot, and which only echo another in a fan-out
   votes       whether the refutation vote count is right
   timing      whether the timeouts and stall thresholds fit reality
   health      how often the infrastructure, not the model, was the problem
+  parallelism whether a scheduler would ever have had work to do
 
 Usage: metrics-report.py [--dir <repo>] [--section <name>] [--json]
 
@@ -42,24 +42,6 @@ def section_routing(events):
             "engine": engine, "runs": len(group), "implements": len(impl),
             "ok_rate": "%d%%" % (100 * ok // len(group)) if group else "-",
             "cost": cost.fmt(" USD"), "mean_s": "%.0f" % secs.mean if secs.n else "?",
-        })
-    return rows
-
-
-def section_reviewers(events):
-    """Per engine acting as reviewer: findings produced, and how many were unique."""
-    rows = []
-    for engine, group in sorted(metrics.by(events, "lens", "engine").items()):
-        found, uniq, cost = metrics.Agg(), metrics.Agg(), metrics.Agg()
-        for event in group:
-            found.add(event.get("findings"))
-            uniq.add(event.get("unique"))
-            cost.add(event.get("cost_usd"))
-        share = ("%d%%" % (100 * uniq.total / found.total)) if found.total else "-"
-        rows.append({
-            "engine": engine, "reviews": len(group),
-            "findings": int(found.total), "unique": int(uniq.total),
-            "unique_share": share, "cost": cost.fmt(" USD"),
         })
     return rows
 
@@ -176,14 +158,39 @@ def section_drift(events):
     return out
 
 
+def section_parallelism(events):
+    """Was there ever anything to run in parallel?
+
+    `next` records an eligibility width on every call for exactly one reason: the
+    question "should the ledger become a scheduler?" should be answered against
+    measured parallelism, not assumed parallelism. Until this section existed the
+    rows were written and never read - a measurement nobody could see is not a
+    measurement.
+
+    A max width of 1 across many runs is the answer: a scheduler would have had
+    nothing to schedule.
+    """
+    rows = [e for e in events if e.get("kind") == "eligibility"]
+    if not rows:
+        return []
+    widths = [e.get("width") or 0 for e in rows]
+    return [{
+        "observations": len(rows),
+        "max_width": max(widths),
+        "ever_above_1": len([w for w in widths if w > 1]),
+        "verdict": ("a scheduler would have had nothing to schedule"
+                    if max(widths) <= 1 else "real parallelism was available"),
+    }]
+
+
 SECTIONS = {
     "drift": ("Did we get the model we asked for", section_drift),
     "routing": ("Which engine to route work to", section_routing),
-    "reviewers": ("Which reviewer's findings are worth adjudicating", section_reviewers),
     "lenses": ("Which lenses earn their slot", section_lenses),
     "votes": ("Is the refutation vote count right", section_votes),
     "timing": ("Do the timeouts fit reality", section_timing),
     "health": ("Was the infrastructure the problem", section_health),
+    "parallelism": ("Would a scheduler ever have had work to do", section_parallelism),
 }
 
 
