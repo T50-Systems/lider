@@ -83,7 +83,7 @@ against captured transcripts.
 | `grok` | agentic CLI | ❌ (final JSON only) | ✅ `--yolo` | **does not stream** — startup watchdog disarmed; review locks down with permission **rules**, its tool denylist fails open |
 | `opencode` | agentic CLI | ❌ | ✅ `--auto` | `opencode run --format json`; review sets `OPENCODE_PERMISSION` deny write/edit |
 | `pi` | agentic CLI | ❌ | ✅ | `pi -p --mode json --no-session`; review uses `--tools read,grep,find,ls` only |
-| `calvoproxy` | chat completion | ❌ | ⛔ refused | free models, no tools; contrast/bulk only |
+| `calvoproxy` | HTTP chat (CalvoProxy) | ❌ | ⛔ refused | One OpenRouter completion via local proxy — **no tools**. Not “free models can’t use tools”: for tools + a cheap model use `--engine opencode` (or another agentic adapter) with that model pinned |
 | `generic` | any CLI | ❌ | ✅ | `LIDER_BIN` / `LIDER_ARGS_*`; the fallback for unknown ids |
 
 ## Measured traps worth not re-learning

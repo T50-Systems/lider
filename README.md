@@ -48,7 +48,7 @@ Selected with `--engine <id>`, or `LIDER_ENGINE`. Contract and how to add one: [
 | `codex` | agentic CLI | ✅ | ✅ full access | isolated `CODEX_HOME`; may be usage-limited on some accounts |
 | `opencode` | agentic CLI | ❌ | ✅ `--auto` | `opencode run --format json` |
 | `pi` | agentic CLI | ❌ | ✅ | `pi -p --mode json`; review = read-only tools |
-| `calvoproxy` | chat completion | ❌ | ⛔ refused | free models, no tools; contrast/bulk only |
+| `calvoproxy` | HTTP chat (CalvoProxy) | ❌ | ⛔ refused | **This adapter** = one completion via local proxy, no tools/filesystem. Free/cheap models **with tools** go through `--engine opencode` (or `pi`/`claude`/…) configured with that model — not this adapter |
 | `generic` | any CLI | ❌ | ✅ | `LIDER_BIN` / `LIDER_ARGS_*`; fallback for unknown ids |
 
 ## Language split

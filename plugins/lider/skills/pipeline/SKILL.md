@@ -284,7 +284,7 @@ That leaves two engine families for the cross-engine rule, which is what matters
 | **openai** | `codex` | implementer/reviewer when account allows (usage-limited on some installs) |
 | **opencode** | `opencode` | implementer (`--auto`); reviewer via permission deny edit/write |
 | **pi** | `pi` | implementer; reviewer with read-only tool allowlist |
-| **openrouter** | `calvoproxy` | contrast/bulk only — **cannot implement** |
+| **openrouter** | `calvoproxy` | chat-only via local proxy — **no tools** (this adapter). Cheap models *with* tools → `--engine opencode` + that model |
 
 **Reviewer ≠ implementer family is still the rule.** Natural pairs on this install:
 **Claude implements, Grok reviews** — or any two different families above.
