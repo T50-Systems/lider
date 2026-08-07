@@ -1,0 +1,5 @@
+{
+  "name": "lider",
+  "version": "0.15.0",
+  "description": "Lider: engine-agnostic workflow orchestrator - supervised runtime, multi-engine adapters (claude, grok, calvoproxy, codex, generic), pair-review, phase pipeline, forge-agnostic PR promotion, preflight and effect verification. Skills: /pair-review, /preflight, /pipeline, /promote, /verify. Runs under Grok Build and Claude Code."
+}

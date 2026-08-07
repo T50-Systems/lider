@@ -45,6 +45,7 @@ SCHEMA_VERSION = 1
 # --- the graph -------------------------------------------------------------
 # node -> what may follow it. Everything the flow is allowed to do is here; if a
 # transition is not in this table it does not happen.
+# Construction (the default). Building and shipping one feature.
 GRAPH = {
     "init":       ["spec"],
     # `implement` is the flat path, kept for a phase that is a single unit.
@@ -66,6 +67,22 @@ GRAPH = {
     "escalated":  ["spec", "implement", "done"],
     "done":       [],
 }
+
+# Inception (optional separate run). Discovery only: pin a frame, declare
+# criteria/questions/units, optionally challenge, then seal a handoff under
+# .lider/handoffs/. No implement, no promote. Construction imports the handoff.
+# RECOMMENDED before construction; required only in strict mode.
+INCEPTION_GRAPH = {
+    "init":      ["spec"],
+    "spec":      ["challenge", "sealed"],
+    "challenge": ["spec", "sealed"],
+    "sealed":    [],
+}
+
+KIND_CONSTRUCTION = "construction"
+KIND_INCEPTION = "inception"
+HANDOFF_KIND = "lider.inception.handoff"
+HANDOFF_VERSION = 1
 
 # The subgraph one UNIT OF WORK walks. A phase's spec is required to "split the
 # feature into implementable units", and until now that sentence had no
@@ -126,8 +143,43 @@ def runs_dir(root):
     return os.path.join(root, ".lider", "runs")
 
 
+def handoffs_dir(root):
+    """Operational sealed handoffs - under .lider (gitignored with the rest)."""
+    return os.path.join(root, ".lider", "handoffs")
+
+
+def handoff_path(root, handoff_id):
+    return os.path.join(handoffs_dir(root), "%s.json" % handoff_id)
+
+
 def run_path(root, run_id):
     return os.path.join(runs_dir(root), run_id, "run.json")
+
+
+def graph_for(state):
+    """Which edge table this run walks. Kind defaults to construction for old ledgers."""
+    if state.get("kind") == KIND_INCEPTION:
+        return INCEPTION_GRAPH
+    return GRAPH
+
+
+def env_strict():
+    return os.environ.get("LIDER_STRICT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_strict(state):
+    """Per-run flag wins; else LIDER_STRICT. Stored at init so it survives the session."""
+    if state.get("strict"):
+        return True
+    return env_strict()
+
+
+def challenged(state):
+    """Was a challenge performed? Entering the node, or an ok check named challenge."""
+    if "challenge" in (state.get("path") or []):
+        return True
+    chk = (state.get("checks") or {}).get("challenge")
+    return bool(chk and chk.get("verdict") == "ok")
 
 
 def load(root, run_id):
@@ -196,6 +248,7 @@ def commit(root, rid, state, kind, **fields):
 def new_unit(unit_id, title, depends_on, max_rounds):
     return {
         "id": unit_id, "title": title, "depends_on": list(depends_on),
+        "covers": [],
         "node": "pending", "path": ["pending"],
         "findings": [], "rounds": [], "max_rounds": max_rounds,
         "roles": {}, "created_at": int(time.time()),
@@ -328,10 +381,17 @@ def cmd_init(args):
     if load(root, rid) and not args.force:
         print("rungraph: run '%s' already exists (use --force to reset)" % rid, file=sys.stderr)
         return REFUSED
+    kind = getattr(args, "kind", None) or KIND_CONSTRUCTION
+    if kind not in (KIND_CONSTRUCTION, KIND_INCEPTION):
+        print("rungraph: --kind must be construction or inception", file=sys.stderr)
+        return USAGE
+    strict = bool(getattr(args, "strict", False) or env_strict())
     state = {
         "schema_version": SCHEMA_VERSION,
         "run_id": rid,
         "title": args.title,
+        "kind": kind,
+        "strict": strict,
         "created_at": int(time.time()),
         "node": "init",
         "path": ["init"],
@@ -345,6 +405,8 @@ def cmd_init(args):
         "questions": [],
         "max_rounds": args.max_rounds,
         "events": [],
+        "handoff": None,       # construction: imported sealed handoff ref
+        "handoff_out": None,   # inception: path written by seal
     }
     save(root, rid, state)
     # The ledger is working state, not source. Keep it out of the repo by
@@ -353,7 +415,20 @@ def cmd_init(args):
     if not os.path.exists(ignore):
         with open(ignore, "w", encoding="utf-8") as fh:
             fh.write("*\n")
-    print("run '%s' initialised at node 'init'" % rid)
+    print("run '%s' initialised at node 'init' (kind=%s%s)"
+          % (rid, kind, ", STRICT" if strict else ""))
+    if kind == KIND_INCEPTION:
+        print("inception: discovery only - pin a frame (`spec --file`), declare "
+              "criteria/questions/units, optional challenge, then `enter sealed`.")
+        if not strict:
+            print("inception: challenge is OPTIONAL (warns at sealed). "
+                  "Strict mode requires it: init --strict or LIDER_STRICT=1.")
+    else:
+        print("construction: a sealed inception handoff is RECOMMENDED "
+              "(`import --handoff .lider/handoffs/<id>.json`), not required. "
+              "Flat path (init -> spec -> implement) still works.")
+        if strict:
+            print("STRICT: `import --handoff` is required before `enter implement`.")
     return OK
 
 
@@ -528,8 +603,14 @@ def cmd_spec(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
     with open(args.file, encoding="utf-8") as fh:
         text = fh.read()
-    missing = [s for s in ("scope", "constraint", "verification")
-               if s not in text.lower()]
+    inception = state.get("kind") == KIND_INCEPTION
+    # Construction build specs need checkable sections. An inception FRAME is a
+    # discovery doc - scope/constraints still help; "verification" is often N/A.
+    if inception:
+        missing = [s for s in ("scope", "constraint") if s not in text.lower()]
+    else:
+        missing = [s for s in ("scope", "constraint", "verification")
+                   if s not in text.lower()]
     if missing and not args.force:
         # The closed spec is the flow's most important deliverable; a spec with no
         # verification section cannot produce a checkable outcome later.
@@ -547,8 +628,11 @@ def cmd_spec(args):
         "text": text,
         "at": int(time.time()),
     }
-    commit(root, rid, state, "spec", sha256=state["spec"]["sha256"][:12])
-    print("spec pinned (%s, %d bytes)" % (state["spec"]["sha256"][:12], state["spec"]["bytes"]))
+    commit(root, rid, state, "spec", sha256=state["spec"]["sha256"][:12],
+           role="frame" if inception else "build")
+    label = "frame" if inception else "spec"
+    print("%s pinned (%s, %d bytes)" % (label, state["spec"]["sha256"][:12],
+                                        state["spec"]["bytes"]))
     return OK
 
 
@@ -760,6 +844,165 @@ def check_same_family(impl, rev, label=""):
     return OK, None
 
 
+def check_seal(state, force):
+    """May this inception run seal a handoff? Pure - no writes."""
+    if force:
+        return OK, None
+    if not state.get("spec"):
+        return UNDETERMINED, (
+            "cannot seal - no frame is pinned. Pin discovery with `spec --file`.")
+    pending = open_questions(state)
+    if pending:
+        return UNDETERMINED, (
+            "cannot seal - %d open question(s): %s. Answer or assume with --answer."
+            % (len(pending), ", ".join(q["id"] for q in pending)))
+    if not state.get("criteria"):
+        return REFUSED, (
+            "cannot seal - no acceptance criteria. Declare with `criterion add`, or "
+            "this handoff has nothing Construction can check coverage against.")
+    missing = uncovered_criteria(state)
+    if missing:
+        return REFUSED, (
+            "cannot seal - %d required criterion/criteria covered by no unit: %s. "
+            "Declare a unit with --covers, or `criterion defer --reason ...`. NOTE: "
+            "this checks the MAPPING only, not that anything was designed well."
+            % (len(missing), ", ".join(c["id"] for c in missing)))
+    if not challenged(state):
+        if is_strict(state):
+            return REFUSED, (
+                "STRICT: cannot seal without a challenge. `enter challenge` (and usually "
+                "assign a challenger from another family), or record "
+                "`check --name challenge --verdict ok --evidence ...`, then "
+                "`enter sealed`, or --force.")
+        # Non-strict: allowed; caller prints a warning (evaluate stays pure).
+    return OK, None
+
+
+def build_handoff_body(state, rid):
+    """Canonical handoff dict (no self-hash yet)."""
+    spec = state.get("spec") or {}
+    return {
+        "kind": HANDOFF_KIND,
+        "version": HANDOFF_VERSION,
+        "id": rid,
+        "sealed_at": int(time.time()),
+        "inception_run": rid,
+        "strict": bool(state.get("strict")),
+        "frame": {
+            "path": spec.get("path"),
+            "sha256": spec.get("sha256"),
+            "bytes": spec.get("bytes"),
+            "text": spec.get("text"),
+            "at": spec.get("at") or int(time.time()),
+        },
+        "criteria": list(state.get("criteria") or []),
+        "questions": [q for q in (state.get("questions") or [])
+                      if q.get("status") != "open"],
+        "units": [{
+            "id": u["id"], "title": u.get("title", ""),
+            "covers": list(u.get("covers") or []),
+            "depends_on": list(u.get("depends_on") or []),
+        } for u in (state.get("units") or [])],
+        "challenge": {
+            "done": challenged(state),
+            "path_includes_challenge": "challenge" in (state.get("path") or []),
+        },
+        "roles": dict(state.get("roles") or {}),
+    }
+
+
+def handoff_digest(body):
+    """Stable hash of the handoff without the sha256 field itself."""
+    payload = {k: v for k, v in body.items() if k != "sha256"}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def write_handoff(root, state, rid):
+    """Seal to .lider/handoffs/<id>.json. Returns (path, sha256)."""
+    body = build_handoff_body(state, rid)
+    digest = handoff_digest(body)
+    body["sha256"] = digest
+    path = handoff_path(root, rid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(body, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        os.path.exists(tmp) and os.unlink(tmp)
+        raise
+    return path, digest
+
+
+def load_handoff(path):
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if doc.get("kind") != HANDOFF_KIND:
+        raise ValueError("not a lider inception handoff (kind=%r)" % doc.get("kind"))
+    stored = doc.get("sha256")
+    if not stored:
+        raise ValueError("handoff has no sha256")
+    if handoff_digest(doc) != stored:
+        raise ValueError("handoff sha256 mismatch - file was modified after seal")
+    return doc
+
+
+def cmd_import(args):
+    """Construction: load a sealed inception handoff into this run (operational path)."""
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if state.get("kind") == KIND_INCEPTION:
+        print("rungraph: import is for construction runs, not inception", file=sys.stderr)
+        return REFUSED
+    if state["node"] != "init" and not args.force:
+        print("rungraph: import only from node 'init' (now at '%s'); --force to override"
+              % state["node"], file=sys.stderr)
+        return REFUSED
+    path = os.path.abspath(args.handoff)
+    try:
+        doc = load_handoff(path)
+    except (OSError, ValueError) as exc:
+        print("rungraph: cannot import handoff: %s" % exc, file=sys.stderr)
+        return UNDETERMINED
+
+    state["criteria"] = list(doc.get("criteria") or [])
+    state["questions"] = list(doc.get("questions") or [])
+    # Units re-enter as pending subgraphs; construction will walk them.
+    units = []
+    for raw in doc.get("units") or []:
+        unit = new_unit(raw["id"], raw.get("title", ""),
+                        list(raw.get("depends_on") or []),
+                        state["max_rounds"])
+        unit["covers"] = list(raw.get("covers") or [])
+        units.append(unit)
+    state["units"] = units
+    state["handoff"] = {
+        "path": path,
+        "sha256": doc["sha256"],
+        "id": doc.get("id"),
+        "inception_run": doc.get("inception_run"),
+        "imported_at": int(time.time()),
+    }
+    # Frame text is reference only; construction still pins its own build spec.
+    if doc.get("frame") and doc["frame"].get("text") is not None:
+        state["inception_frame"] = {
+            "path": doc["frame"].get("path"),
+            "sha256": doc["frame"].get("sha256"),
+            "bytes": doc["frame"].get("bytes"),
+            "text": doc["frame"].get("text"),
+            "at": int(time.time()),
+        }
+    commit(root, rid, state, "import", handoff=doc.get("id"), path=path,
+           sha256=doc["sha256"][:12], units=len(units),
+           criteria=len(state["criteria"]))
+    print("imported handoff '%s' (%s) - %d criterion/a, %d unit(s). "
+          "Pin the BUILD spec next (`spec --file`), then enter the construction graph."
+          % (doc.get("id"), doc["sha256"][:12], len(state["criteria"]), len(units)))
+    return OK
+
+
 def evaluate_unit(state, unit, dest, force):
     """Would this unit transition be allowed? Returns (code, message). Mutates NOTHING."""
     cur = unit["node"]
@@ -803,11 +1046,28 @@ def evaluate_unit(state, unit, dest, force):
 def evaluate_run(state, dest, force):
     """Would this run transition be allowed? Returns (code, message). Mutates NOTHING."""
     cur = state["node"]
+    graph = graph_for(state)
 
-    code, message = check_edge(GRAPH, cur, dest, "", "node")
+    # --- inception-only destinations ---------------------------------------
+    if state.get("kind") == KIND_INCEPTION:
+        # Construction-only nodes: refuse with a clear reason (not "unknown node").
+        if dest not in graph and dest in GRAPH:
+            return REFUSED, (
+                "inception run cannot enter '%s' - discovery only (no implement/promote). "
+                "Finish with `enter sealed`, then start a construction run and "
+                "`import --handoff`." % dest)
+        code, message = check_edge(graph, cur, dest, "", "node")
+        if code != OK:
+            return code, message
+        if dest == "sealed":
+            return check_seal(state, force)
+        return OK, None
+
+    code, message = check_edge(graph, cur, dest, "", "node")
     if code != OK:
         return code, message
 
+    # --- construction ------------------------------------------------------
     if dest in GATED and not force:
         bad, unknown = blocking_checks(state)
         if bad:
@@ -819,6 +1079,11 @@ def evaluate_run(state, dest, force):
                                   % (dest, ", ".join(unknown)))
 
     if dest == "implement":
+        if is_strict(state) and not state.get("handoff") and not force:
+            return REFUSED, (
+                "STRICT: cannot implement without a sealed inception handoff. "
+                "`import --handoff .lider/handoffs/<id>.json` first, or init without "
+                "--strict / unset LIDER_STRICT for the recommended-but-optional path.")
         code, message = check_implement_prereqs(state, force)
         if code != OK:
             return code, message
@@ -876,21 +1141,48 @@ def evaluate(state, dest, unit_id, force):
 def cmd_enter(args):
     """The guard, applied. Every transition in the flow goes through here."""
     root, (rid, state) = args.dir, need(args.dir, args.run)
-    code, message = evaluate(state, args.node, args.unit, args.force)
+    dest = args.node
+    code, message = evaluate(state, dest, args.unit, args.force)
     if code != OK:
         print("rungraph: %s" % message, file=sys.stderr)
         return code
+
+    # Non-strict inception seal without challenge: allowed, but never silent.
+    if (not args.unit and dest == "sealed" and state.get("kind") == KIND_INCEPTION
+            and not challenged(state) and not args.force):
+        print("rungraph: WARNING: sealing without a challenge. Optional by default; "
+              "strict mode (init --strict / LIDER_STRICT=1) would refuse. "
+              "High-risk work should enter challenge first.", file=sys.stderr)
+
+    # Construction without handoff: recommended, never silent in non-strict either.
+    if (not args.unit and dest == "implement" and state.get("kind") != KIND_INCEPTION
+            and not state.get("handoff") and not is_strict(state) and not args.force):
+        print("rungraph: note: no inception handoff imported. RECOMMENDED: run "
+              "inception, `enter sealed`, then `import --handoff .lider/handoffs/<id>.json`. "
+              "Flat path is allowed; STRICT mode would refuse.", file=sys.stderr)
 
     # One mutation path. scope_of(state, None) is the run itself, so the unit and
     # run cases differ only in what the event records and how the line reads.
     scope = scope_of(state, args.unit)
     before = scope["node"]
-    scope["node"] = args.node
-    scope.setdefault("path", []).append(args.node)
+    scope["node"] = dest
+    scope.setdefault("path", []).append(dest)
     extra = {"unit": args.unit} if args.unit else {}
+
+    if not args.unit and dest == "sealed" and state.get("kind") == KIND_INCEPTION:
+        path, digest = write_handoff(root, state, rid)
+        state["handoff_out"] = {"path": path, "sha256": digest, "at": int(time.time())}
+        extra["handoff"] = path
+        extra["sha256"] = digest[:12]
+        commit(root, rid, state, "enter",
+               **dict(extra, **{"from": before, "to": dest, "forced": bool(args.force)}))
+        print("%s -> sealed%s" % (before, "  (FORCED)" if args.force else ""))
+        print("handoff written: %s (%s)" % (path, digest[:12]))
+        return OK
+
     commit(root, rid, state, "enter",
-           **dict(extra, **{"from": before, "to": args.node, "forced": bool(args.force)}))
-    print("%s%s -> %s%s" % (("[%s] " % args.unit) if args.unit else "", before, args.node,
+           **dict(extra, **{"from": before, "to": dest, "forced": bool(args.force)}))
+    print("%s%s -> %s%s" % (("[%s] " % args.unit) if args.unit else "", before, dest,
                             "  (FORCED)" if args.force else ""))
     return OK
 
@@ -939,8 +1231,11 @@ def cmd_next(args):
         units.append({"id": unit["id"], "node": unit["node"], "eligible": eligible,
                       "blocked_by": blocked})
     width = len([u for u in units if u["eligible"]])
-    report = {"run": rid, "node": state["node"],
-              "legal_moves": list(GRAPH[state["node"]]), "units": units,
+    g = graph_for(state)
+    legal = list(g.get(state["node"], []))
+    report = {"run": rid, "node": state["node"], "kind": state.get("kind", KIND_CONSTRUCTION),
+              "strict": is_strict(state),
+              "legal_moves": legal, "units": units,
               "concurrency_width": width}
 
     # Never raises, so measuring cannot break a run.
@@ -973,11 +1268,22 @@ def cmd_show(args):
 
     bad, unknown = blocking_checks(state)
     severe = open_severe(state)
+    kind = state.get("kind", KIND_CONSTRUCTION)
     print("run %s - %s" % (rid, state["title"]))
+    print("kind: %s%s" % (kind, "  STRICT" if is_strict(state) else ""))
     print("node: %s      path: %s" % (state["node"], " -> ".join(state["path"])))
-    print("next: %s" % (", ".join(GRAPH[state["node"]]) or "(terminal)"))
+    legal = graph_for(state).get(state["node"], [])
+    print("next: %s" % (", ".join(legal) or "(terminal)"))
     spec = state["spec"]
-    print("spec: %s" % ("%s (%s)" % (spec["sha256"][:12], spec["path"]) if spec else "NOT PINNED"))
+    frame_label = "frame" if kind == KIND_INCEPTION else "spec"
+    print("%s: %s" % (frame_label,
+                      ("%s (%s)" % (spec["sha256"][:12], spec["path"]) if spec else "NOT PINNED")))
+    if state.get("handoff"):
+        h = state["handoff"]
+        print("handoff in: %s (%s)" % (h.get("path"), (h.get("sha256") or "")[:12]))
+    if state.get("handoff_out"):
+        h = state["handoff_out"]
+        print("handoff out: %s (%s)" % (h.get("path"), (h.get("sha256") or "")[:12]))
     if state["roles"]:
         print("roles:")
         for role, info in state["roles"].items():
@@ -1064,14 +1370,26 @@ def build_parser():
 
     q = sub.add_parser("init", help="start a run")
     q.add_argument("--title", required=True)
+    q.add_argument("--kind", choices=[KIND_CONSTRUCTION, KIND_INCEPTION],
+                   default=KIND_CONSTRUCTION,
+                   help="construction (default, build+ship) or inception (discovery, seal handoff)")
+    q.add_argument("--strict", action="store_true",
+                   help="require challenge before seal (inception) and handoff import "
+                        "before implement (construction). Also set by LIDER_STRICT=1")
     q.add_argument("--max-rounds", type=int, default=3)
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_init)
 
-    q = sub.add_parser("spec", help="pin the closed spec")
+    q = sub.add_parser("spec", help="pin the closed spec (or inception frame)")
     q.add_argument("--file", required=True)
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_spec)
+
+    q = sub.add_parser("import", help="construction: load a sealed inception handoff "
+                                      "from .lider/handoffs/")
+    q.add_argument("--handoff", required=True, help="path to sealed handoff JSON")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_import)
 
     q = sub.add_parser("assign", help="record who plays a role")
     q.add_argument("--role", required=True,

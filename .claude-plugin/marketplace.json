@@ -4,14 +4,15 @@
     "name": "T50-Systems"
   },
   "metadata": {
-    "description": "T50-Systems marketplace: workflow plugins for Claude Code."
+    "description": "T50-Systems marketplace: workflow plugins for Claude Code and Grok Build."
   },
   "plugins": [
     {
       "name": "lider",
       "source": "./plugins/lider",
-      "description": "Lider: engine-agnostic workflow orchestrator (preflight conditions -> closed spec -> implementer -> pair-review with a second engine -> adjudication -> PR promotion -> effect verification).",
-      "version": "0.14.0"
+      "description": "Lider: engine-agnostic workflow orchestrator (preflight conditions -> closed spec -> implementer -> pair-review with a second engine -> adjudication -> PR promotion -> effect verification). Skills: /pair-review, /preflight, /pipeline, /promote, /verify.",
+      "version": "0.15.0"
     }
   ]
 }
+

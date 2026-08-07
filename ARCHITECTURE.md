@@ -16,7 +16,11 @@ This document describes how the `lider` plugin is built and, more importantly, *
 
 ## 1. Overview
 
-Lider orchestrates a phase of work across engines: **Fable** (architect) specs and adjudicates, a Claude model (**Opus/Sonnet/Haiku**) implements, and an engine from a *different family* reviews - **Grok** on this install, since Codex is not reachable here. The user-facing skills are `/pipeline`, `/pair-review`, `/preflight`, `/promote` and `/verify`.
+Lider orchestrates a phase of work across engines: an architect specs and adjudicates, an implementer builds, and an engine from a *different family* reviews. On this install the natural pair is **Claude implements, Grok reviews** (Codex is not reachable here). The user-facing skills are `/pipeline`, `/pair-review`, `/preflight`, `/promote` and `/verify`.
+
+**Dual harness.** The same plugin package installs under **Grok Build** (`.grok-plugin/marketplace.json`, `GROK_PLUGIN_ROOT`) and **Claude Code** (`.claude-plugin/`, `CLAUDE_PLUGIN_ROOT`). Skills resolve the root as `${GROK_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}`. Runtime adapters and the ledger are harness-agnostic; only the host that reads the skills changes. Cross-engine review still means *implementer family ≠ reviewer family*, not "whatever the host is".
+
+**Two run kinds.** `construction` (default) is the build/ship graph. `inception` is an optional separate discovery run that seals an operational handoff under `.lider/handoffs/` for construction to `import`. Inception is **recommended**, not required; `init --strict` / `LIDER_STRICT=1` makes challenge mandatory at seal and handoff import mandatory before implement.
 
 The interesting engineering is not the orchestration prose (that lives in the `SKILL.md` files) but the **runtime that drives an engine CLI**. A bare `<engine> exec` call is a black box: you cannot see what it is doing, a hang costs you the whole timeout, a killed call can orphan child processes, and it inherits the user's entire personal install (plugins, skills, hooks, a multi-GB log DB) on every invocation. Lider wraps that call in a supervision layer that fixes all of the above.
 

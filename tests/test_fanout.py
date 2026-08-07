@@ -287,3 +287,70 @@ class TestUsageAndMetrics:
 
     def test_a_missing_status_file_yields_an_empty_usage_not_a_crash(self, tmp_path):
         assert fanout.read_usage(str(tmp_path / "nope.log")) == {}
+
+
+class TestPruneAtTheCLIAndLaunchEdges:
+    """prune_lenses was unit-tested; the review path that calls it was not.
+
+    Same for a model pin on a lens and a corrupt round.json after reduce - the
+    branches that turn 'we tried' into 'undetermined' instead of a crash.
+    """
+
+    def test_prune_lenses_flag_drops_a_sustained_echo_and_says_so(self, fake_fanout, tmp_path):
+        from lider import metrics
+        for _ in range(4):
+            metrics.record(tmp_path, "lens", lens="echo", unique=0, engine="claude")
+            metrics.record(tmp_path, "lens", lens="correctness", unique=2, engine="claude")
+        rc, doc, out = fake_fanout(
+            NOTHING, "review", "--scope", "d",
+            "--lens", "echo", "--lens", "correctness",
+            "--prune-lenses", "--prune-min-runs", "3")
+        assert rc == 0
+        assert "dropping lens 'echo'" in out
+        # Only correctness was launched.
+        assert [r["lens"] for r in doc["reviewers"]] == ["correctness"]
+
+    def test_a_model_pin_on_a_lens_is_recorded_on_the_child_log(self, fake_fanout, tmp_path):
+        """`lens:engine:model` must reach agent-exec, or the pin is theatre."""
+        rc, doc, _ = fake_fanout(
+            NOTHING, "review", "--scope", "d",
+            "--lens", "correctness:generic:opus-pin")
+        assert rc == 0
+        log = (tmp_path / "run" / "correctness.log").read_text(encoding="utf-8")
+        assert "model: opus-pin" in log
+        assert doc["reviewers"][0]["lens"] == "correctness"
+
+    def test_unreadable_round_after_reduce_is_undetermined_not_a_crash(
+            self, tmp_path, monkeypatch):
+        """If reduce-findings leaves garbage, the wave still returns a document."""
+        monkeypatch.setattr(fanout, "run_agent", lambda *a, **k: 0)
+
+        def torn_reduce(cmd, *a, **k):
+            out = cmd[cmd.index("--out") + 1]
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("{not json")
+            return 0
+
+        monkeypatch.setattr(subprocess, "call", torn_reduce)
+        args = type("A", (), {
+            "scope": "d", "schema": FINDINGS_SCHEMA, "timeout": 10, "concurrency": 1,
+        })()
+        jobs, doc = fanout.launch_round(
+            args, [("correctness", "claude", None)], str(tmp_path), [])
+        assert jobs and jobs[0]["exit"] == 0
+        assert doc["coverage"] == "undetermined"
+        assert doc["findings"] == []
+
+    def test_record_round_survives_a_missing_round_document(self, tmp_path, monkeypatch):
+        """Metrics for a wave that produced no round.json must still not raise."""
+        monkeypatch.setenv("LIDER_METRICS_DIR", str(tmp_path))
+        jobs = [{"lens": "correctness", "engine": "claude", "model": None,
+                 "out": str(tmp_path / "c.json"), "log": str(tmp_path / "c.log"),
+                 "exit": 0}]
+        fanout.record_round(
+            type("A", (), {"out": str(tmp_path)})(),
+            jobs, str(tmp_path / "nope-round.json"), "review")
+        rows = [json.loads(x) for x in
+                (tmp_path / ".lider" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert any(r["kind"] == "lens" and r["lens"] == "correctness" for r in rows)
+        assert any(r["kind"] == "round" for r in rows)
