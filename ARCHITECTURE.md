@@ -41,7 +41,7 @@ scripts/agent-exec.py        scripts/agent-implement.py   ← the two wrappers
 
 - **Adapters** (`lider/adapters/<id>.py`) — the only place an engine is named. Contract in that package's `README.md`.
 - **Supervision** (`lider/runtime.py`) — `Supervisor.run`: observability, watchdogs, tree-kill, classified retry, backoff, checkpoint hook.
-- **Wrappers** — `agent-exec.py` (review, read-only, structured output) and `agent-implement.py` (implementer, write access). Thin: parse args, ask the adapter for the command line, hand it to the supervisor. The `.sh` names survive as six-line shims so existing callers keep working.
+- **Wrappers** — `agent-exec.py` (review, read-only, structured output) and `agent-implement.py` (implementer, write access). Thin: parse args, ask the adapter for the command line, hand it to the supervisor.
 - **Skills** — the model-driven layer that decides *which* engine does *what* and reads the supervision signals to react.
 
 ### 2.1 The rule that shapes the contract
@@ -140,10 +140,10 @@ Before launch, `agent_preflight` fails fast (`exit 2`) on a missing review schem
 
 Both are thin: load the adapter, locate the binary, run preflight, isolate, write a log header, ask the adapter to build the command line, and call `run_supervised`. Both take `--engine <id>`. They differ in access level and recovery:
 
-### `agent-exec.sh` — review (read-only)
+### `agent-exec.py` — review (read-only)
 The adapter builds a read-only invocation bound to `findings.schema.json`. Engines that enforce the schema themselves (`adapter_native_schema`) are only checked for parseability; engines that merely print JSON get their payload lifted out of the log (`adapter_extract`) and **validated locally** against the schema (`validate-json.py`) — otherwise everything downstream would trust an unvalidated blob. `exit 3` on missing / malformed / non-conformant output. Used by `/pair-review` and the pipeline's cross-engine reviewer path. Retries are safe (read-only), so `RETRIES` defaults to 1.
 
-### `agent-implement.sh` — implementer (write access)
+### `agent-implement.py` — implementer (write access)
 The adapter builds a full-access invocation. On Codex that is `--sandbox danger-full-access` (read/write anywhere, network on, no approvals), lifting the `workspace-write` cap of the Codex plugin's app-server path. Designed to run in the background: a watcher polls `git status`, `<log>.status.json`, and a `<done>` marker. An adapter may **refuse** the mode outright (`calvoproxy` does — it has no filesystem), which is reported as `exit 2` rather than a run that silently does nothing.
 
 **Safe auto-recovery.** Blindly re-running an implementer that died mid-write is unsafe. So auto-retry is enabled **only when the working tree is clean in a git repo at launch** — then the checkpoint is exactly `HEAD`, and recovery is a precise `reset --hard <HEAD> && clean -ffd` (+ recursive submodule restore). The reset **refuses if HEAD moved to a different branch** since launch (never destroy another branch's commits), preserves ignored inputs like `.local/` (no `-x`), and only reports success if the tree is verifiably clean again. A dirty tree or non-repo disables auto-retry and leaves recovery to the orchestrator.
@@ -185,7 +185,7 @@ Exit codes match the rest of the plugin: `0` ok, `1` refused, `2` undetermined. 
 | Open decisions / hard debugging | **Sol** (Codex) | Where judgment under uncertainty matters |
 | Review | **≠ implementer** | Same-engine review shares blind spots |
 
-The reviewer table enforces cross-engine review (Opus reviews Codex work via read-yourself; Codex reviews Claude work via `codex-exec.sh --model`). A **manual override** (`--impl codex|opus|fable`) lets the user pin the implementer and have the *opposite* engine auto-assigned as reviewer, preserving the cross-engine rule. When no engine is pinned, the pipeline asks which one to use before implementing.
+The reviewer table enforces cross-engine review (Opus reviews Codex work via read-yourself; Codex reviews Claude work via `agent-exec.py --engine codex --model`). A **manual override** (`--impl codex|opus|fable`) lets the user pin the implementer and have the *opposite* engine auto-assigned as reviewer, preserving the cross-engine rule. When no engine is pinned, the pipeline asks which one to use before implementing.
 
 ## 7. Design decisions & rationale
 
