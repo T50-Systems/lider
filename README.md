@@ -133,6 +133,22 @@ Its first run found two live bugs in cost accounting: `grok.usage()` used a flat
 against a nested envelope, so **every Grok run had been silently recorded as
 cost-unmeasured**, and `claude.usage()` substring-matched compact JSON.
 
+## Dependencies: none at runtime, on purpose
+
+The plugin needs **nothing installed but Python**. `rungraph.py` states that as a
+constraint, and it is why hundreds of its tests run without an engine, a network or a
+package. `lider/validate.py` uses `jsonschema` when present and falls back to a built-in
+checker when it is not; both paths are tested, because the fallback is the one most
+people hit.
+
+Development is where the tools live — see [`requirements-dev.txt`](requirements-dev.txt).
+The most useful of them is **pydantic, used only in the tests**: the three durable
+formats (`run.json`, `status.json`, `metrics.jsonl`) are written as plain dicts and
+validated by nothing at runtime, so [`tests/models.py`](tests/models.py) declares them as
+**strict** models and checks them against what the code actually wrote. `extra="forbid"`
+is the mechanism — a field added, renamed or retyped fails a test instead of surfacing in
+someone's resumed session a week later. The models never ship.
+
 ## Exit codes (both wrappers)
 
 | Code | Meaning | Retryable |
