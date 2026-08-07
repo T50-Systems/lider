@@ -72,6 +72,47 @@ Four rules it enforces so you do not have to remember them:
 `--force` overrides any single guard and is **recorded in the ledger as forced**. Use it when
 you have a real reason and say what it was; never to make a refusal go away quietly.
 
+### Units of work — when a phase is more than one thing
+
+Step 1 tells you to *split the feature into implementable units*. That sentence now has a
+representation: **each unit is its own subgraph**, with its own implementer, reviewer,
+findings, rounds and convergence. Without it a three-unit phase is one flat run and the
+ledger cannot say which unit is stuck.
+
+```bash
+rungraph.py unit add --id auth --title "login flow"
+rungraph.py unit add --id api  --title "endpoints" --depends-on auth
+rungraph.py enter plan
+
+# each unit walks its own cycle, independently
+rungraph.py enter implement --unit auth
+rungraph.py enter review    --unit auth
+rungraph.py findings --unit auth --file <round.json>
+rungraph.py enter adjudicate --unit auth
+rungraph.py enter done      --unit auth      # refused while its BLOCKERs are undecided
+
+rungraph.py enter join                        # the barrier
+```
+
+Unit nodes: `pending → implement → review → adjudicate → done`, plus the loop-back
+`adjudicate → implement` and the exits `escalated` / `dropped`.
+
+Three rules it enforces that prose could not:
+
+- **A unit may not start before what it depends on has finished.** Otherwise the dependency
+  is a comment and the work lands in an order nobody chose.
+- **`join` will not open while any unit is open**, and it names them with their node.
+  `dropped` counts as terminal — descoping is a legitimate decision, and one that must be
+  visible rather than silent.
+- **A dropped unit does not hide its findings.** `verify` still refuses over an undecided
+  BLOCKER inside it, reported as `unit/finding-id`.
+
+The convergence rules are the same ones, applied per unit: a defect surviving three rounds
+*inside a unit* stops that unit, not the whole phase.
+
+**A phase that is genuinely one unit does not declare any** — the flat path
+(`spec → implement`) is unchanged.
+
 ## Fan-out — many lenses, then many skeptics
 
 One reviewer is one opinion. For anything beyond a routine ticket, step 3 should be a fan-out:

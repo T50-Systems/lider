@@ -46,9 +46,14 @@ SCHEMA_VERSION = 1
 # transition is not in this table it does not happen.
 GRAPH = {
     "init":       ["spec"],
-    "spec":       ["challenge", "preflight", "implement"],
-    "challenge":  ["spec", "preflight", "implement"],   # a challenger may send the spec back
-    "preflight":  ["implement", "blocked"],
+    # `implement` is the flat path, kept for a phase that is a single unit.
+    # `plan` is the decomposed path: units run their own subgraphs and `join` is
+    # the barrier that will not open until every one of them is terminal.
+    "spec":       ["challenge", "preflight", "plan", "implement"],
+    "challenge":  ["spec", "preflight", "plan", "implement"],
+    "preflight":  ["plan", "implement", "blocked"],
+    "plan":       ["join", "spec", "escalated"],
+    "join":       ["verify", "plan", "escalated"],
     "implement":  ["review"],
     "review":     ["adjudicate"],
     "adjudicate": ["implement", "spec", "verify", "escalated"],  # the two loop-backs
@@ -56,10 +61,32 @@ GRAPH = {
     "commit":     ["promote"],
     "promote":    ["effect"],
     "effect":     ["done"],
-    "blocked":    ["spec", "preflight"],
+    "blocked":    ["spec", "plan", "preflight"],
     "escalated":  ["spec", "implement", "done"],
     "done":       [],
 }
+
+# The subgraph one UNIT OF WORK walks. A phase's spec is required to "split the
+# feature into implementable units", and until now that sentence had no
+# representation: a phase with three units was one flat run, and the ledger could
+# not say which unit was stuck.
+#
+# Each unit runs this on its own, with its own findings, rounds and convergence.
+# The phase does not advance past `join` until every unit is terminal.
+UNIT_GRAPH = {
+    "pending":    ["implement", "dropped"],
+    "implement":  ["review"],
+    "review":     ["adjudicate"],
+    "adjudicate": ["implement", "done", "escalated"],
+    "escalated":  ["implement", "done", "dropped"],
+    "done":       [],
+    "dropped":    [],
+}
+
+# A unit is terminal when it will not be worked on again - done, or deliberately
+# abandoned. `dropped` is not a failure: descoping a unit is a legitimate
+# architect decision, and one that must be visible rather than silent.
+UNIT_TERMINAL = ("done", "dropped")
 
 # Nodes that must not be entered while any check is failing or undetermined.
 # Judgment nodes are deliberately absent: adjudicating an undetermined result is
@@ -156,6 +183,47 @@ def log_event(state, kind, **fields):
     state["events"].append(fields)
 
 
+# --- scopes ----------------------------------------------------------------
+# A unit carries the same shape as the run itself - findings, rounds,
+# max_rounds - so every convergence rule below works on either without knowing
+# which it was handed. That is the whole reason units were modelled this way.
+def new_unit(unit_id, title, depends_on, max_rounds):
+    return {
+        "id": unit_id, "title": title, "depends_on": list(depends_on),
+        "node": "pending", "path": ["pending"],
+        "findings": [], "rounds": [], "max_rounds": max_rounds,
+        "roles": {}, "created_at": int(time.time()),
+    }
+
+
+def find_unit(state, unit_id):
+    for unit in state.get("units", []):
+        if unit["id"] == unit_id:
+            return unit
+    return None
+
+
+def scope_of(state, unit_id):
+    """The run, or one of its units. Raises a caller-friendly message if unknown."""
+    if not unit_id:
+        return state
+    unit = find_unit(state, unit_id)
+    if unit is None:
+        known = ", ".join(u["id"] for u in state.get("units", [])) or "(none defined)"
+        raise KeyError("no unit '%s'. Known units: %s" % (unit_id, known))
+    return unit
+
+
+def unblocked(state, unit):
+    """Dependencies that are not finished yet, so this unit may not start."""
+    return [dep for dep in unit.get("depends_on", [])
+            if (find_unit(state, dep) or {}).get("node") not in UNIT_TERMINAL]
+
+
+def unfinished_units(state):
+    return [u for u in state.get("units", []) if u["node"] not in UNIT_TERMINAL]
+
+
 # --- open findings ---------------------------------------------------------
 def open_findings(state):
     return [f for f in state["findings"] if f.get("decision") is None]
@@ -214,6 +282,7 @@ def cmd_init(args):
         "checks": {},
         "findings": [],
         "rounds": [],
+        "units": [],
         "max_rounds": args.max_rounds,
         "events": [],
     }
@@ -225,6 +294,47 @@ def cmd_init(args):
         with open(ignore, "w", encoding="utf-8") as fh:
             fh.write("*\n")
     print("run '%s' initialised at node 'init'" % rid)
+    return OK
+
+
+def cmd_unit(args):
+    """Declare a unit of work, or list them."""
+    root, (rid, state) = args.dir, need(args.dir, args.run)
+    if args.action == "add" and not args.id:
+        print("rungraph: unit add needs --id", file=sys.stderr)
+        return USAGE
+    if args.action == "list":
+        if not state.get("units"):
+            print("no units declared; this run is a single flat unit")
+            return OK
+        for unit in state["units"]:
+            blocked = unblocked(state, unit)
+            print("  %-14s %-11s %-28s %s"
+                  % (unit["id"], unit["node"], unit["title"][:28],
+                     ("blocked by " + ", ".join(blocked)) if blocked else ""))
+        return OK
+
+    if find_unit(state, args.id) and not args.force:
+        print("rungraph: unit '%s' already exists" % args.id, file=sys.stderr)
+        return REFUSED
+    depends = [d.strip() for d in (args.depends_on or "").split(",") if d.strip()]
+    unknown = [d for d in depends if not find_unit(state, d)]
+    if unknown and not args.force:
+        # Declaring a dependency on something that does not exist would make the
+        # barrier unsatisfiable in a way nobody notices until the end.
+        print("rungraph: unit '%s' depends on undeclared unit(s): %s. Declare them "
+              "first." % (args.id, ", ".join(unknown)), file=sys.stderr)
+        return REFUSED
+    if args.id in depends:
+        print("rungraph: unit '%s' cannot depend on itself" % args.id, file=sys.stderr)
+        return REFUSED
+
+    state.setdefault("units", []).append(
+        new_unit(args.id, args.title, depends, args.max_rounds or state["max_rounds"]))
+    log_event(state, "unit", unit=args.id, depends_on=depends)
+    save(root, rid, state)
+    print("unit '%s' declared%s" % (args.id,
+                                    (" (after %s)" % ", ".join(depends)) if depends else ""))
     return OK
 
 
@@ -307,13 +417,18 @@ def cmd_check(args):
 def cmd_findings(args):
     """Ingest a review round's findings JSON (the pair-review contract)."""
     root, (rid, state) = args.dir, need(args.dir, args.run)
+    try:
+        scope = scope_of(state, args.unit)
+    except KeyError as exc:
+        print("rungraph: %s" % exc, file=sys.stderr)
+        return USAGE
     with open(args.file, encoding="utf-8") as fh:
         doc = json.load(fh)
     items = doc.get("findings", []) if isinstance(doc, dict) else doc
     if not isinstance(items, list):
         print("rungraph: %s has no findings array" % args.file, file=sys.stderr)
         return USAGE
-    round_no = len(state["rounds"]) + 1
+    round_no = len(scope["rounds"]) + 1
     added = recurring = 0
     for item in items:
         entry = {
@@ -331,7 +446,7 @@ def cmd_findings(args):
         # Only PRIOR rounds: two reviewers describing one defect inside the same
         # round is the reducer's job, and counting it as a recurrence mislabels a
         # first sighting as a defect that came back.
-        prior = fx.match(entry, [f for f in state["findings"]
+        prior = fx.match(entry, [f for f in scope["findings"]
                                  if f.get("round") != round_no])
         if prior is not None:
             entry["defect_id"] = prior.get("defect_id", prior["id"])
@@ -339,11 +454,11 @@ def cmd_findings(args):
             recurring += 1
         else:
             entry["defect_id"] = entry["id"]
-        state["findings"].append(entry)
+        scope["findings"].append(entry)
         added += 1
-    fresh = [f for f in state["findings"] if f["round"] == round_no]
+    fresh = [f for f in scope["findings"] if f["round"] == round_no]
     severe = len([f for f in fresh if f["severity"] in SEVERE])
-    state["rounds"].append({
+    scope["rounds"].append({
         "round": round_no, "at": int(time.time()),
         "ingested": added, "severe": severe, "recurring": recurring,
         # The identities, not just the count: this is what convergence reads.
@@ -353,31 +468,139 @@ def cmd_findings(args):
         "engine": doc.get("engine") if isinstance(doc, dict) else None,
     })
     log_event(state, "findings", round=round_no, count=added, severe=severe,
-              recurring=recurring)
+              recurring=recurring, unit=args.unit)
     save(root, rid, state)
-    print("round %d: %d findings (%d BLOCKER/MAJOR, %d recurring)"
-          % (round_no, added, severe, recurring))
+    print("%sround %d: %d findings (%d BLOCKER/MAJOR, %d recurring)"
+          % (("[%s] " % args.unit) if args.unit else "", round_no, added, severe, recurring))
     return OK
 
 
 def cmd_adjudicate(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
-    target = next((f for f in state["findings"] if f["id"] == args.finding), None)
+    try:
+        scope = scope_of(state, args.unit)
+    except KeyError as exc:
+        print("rungraph: %s" % exc, file=sys.stderr)
+        return USAGE
+    target = next((f for f in scope["findings"] if f["id"] == args.finding), None)
     if target is None:
         print("rungraph: no finding '%s'" % args.finding, file=sys.stderr)
         return USAGE
     target["decision"] = args.decision
     target["rationale"] = args.rationale or ""
     target["decided_at"] = int(time.time())
-    log_event(state, "adjudicate", finding=args.finding, decision=args.decision)
+    log_event(state, "adjudicate", finding=args.finding, decision=args.decision,
+              unit=args.unit)
     save(root, rid, state)
     print("%s -> %s" % (args.finding, args.decision))
+    return OK
+
+
+def adjudication_guard(scope, label, force):
+    """The loop rules, applied to a run or to one unit - they have one shape.
+
+    Convergence is about WHICH defects are still open, not how many. Counting
+    cannot distinguish "fixed two, introduced one" from "the same BLOCKER is back
+    for the third time" - both read as progress.
+    """
+    if len(scope["rounds"]) >= scope["max_rounds"] and not force:
+        print("rungraph: %sadjudication round limit reached (%d). Escalate to a human "
+              "instead of looping; `enter escalated`." % (label, scope["max_rounds"]),
+              file=sys.stderr)
+        return REFUSED
+    stuck = stuck_defects(scope)
+    if stuck and not force:
+        worst = stuck[0]
+        print("rungraph: %sdefect %s has survived %d rounds (%s). The implementer is not "
+              "fixing it; another pass is not the answer. Change the spec or "
+              "`enter escalated`."
+              % (label, worst["defect_id"], worst["rounds"], worst["summary"][:60]),
+              file=sys.stderr)
+        return REFUSED
+    if len(scope["rounds"]) >= 2:
+        prev = set(scope["rounds"][-2].get("severe_defects") or [])
+        last = set(scope["rounds"][-1].get("severe_defects") or [])
+        if prev and not (prev - last) and not force:
+            print("rungraph: %snot converging - every BLOCKER/MAJOR open in round %d is "
+                  "STILL open in round %d (%s). Nothing was resolved, so another pass "
+                  "is unlikely to help; change the spec or escalate."
+                  % (label, len(scope["rounds"]) - 1, len(scope["rounds"]),
+                     ", ".join(sorted(last & prev)[:4])), file=sys.stderr)
+            return REFUSED
+    return OK
+
+
+def enter_unit(state, unit, dest, force):
+    """Move one unit through its own subgraph."""
+    cur = unit["node"]
+    label = "[%s] " % unit["id"]
+
+    if dest not in UNIT_GRAPH:
+        print("rungraph: %sunknown unit node '%s'. Known: %s"
+              % (label, dest, ", ".join(sorted(UNIT_GRAPH))), file=sys.stderr)
+        return USAGE
+    if dest not in UNIT_GRAPH[cur]:
+        print("rungraph: %s'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
+              % (label, cur, dest, cur, ", ".join(UNIT_GRAPH[cur]) or "(nowhere - terminal)"),
+              file=sys.stderr)
+        return REFUSED
+
+    # A unit may not start before what it depends on has finished. Without this
+    # the dependency is a comment, and the work lands in an order nobody chose.
+    if dest == "implement" and cur == "pending":
+        blocked = unblocked(state, unit)
+        if blocked and not force:
+            print("rungraph: %scannot start - depends on unfinished unit(s): %s"
+                  % (label, ", ".join(blocked)), file=sys.stderr)
+            return REFUSED
+
+    if dest in ("done",):
+        still = open_severe(unit)
+        if still and not force:
+            print("rungraph: %scannot finish - %d undecided BLOCKER/MAJOR finding(s): %s"
+                  % (label, len(still), ", ".join(f["id"] for f in still)), file=sys.stderr)
+            return REFUSED
+
+    if dest == "adjudicate" and not force:
+        impl = unit["roles"].get("implementer") or state["roles"].get("implementer")
+        rev = unit["roles"].get("reviewer") or state["roles"].get("reviewer")
+        if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
+            print("rungraph: %simplementer and reviewer are both %s - adjudicating a "
+                  "same-family review." % (label, impl["family"]), file=sys.stderr)
+            return REFUSED
+
+    if cur == "adjudicate" and dest == "implement":
+        code = adjudication_guard(unit, label, force)
+        if code != OK:
+            return code
+
+    unit["node"] = dest
+    unit.setdefault("path", []).append(dest)
     return OK
 
 
 def cmd_enter(args):
     """The guard. Every transition in the flow goes through here."""
     root, (rid, state) = args.dir, need(args.dir, args.run)
+
+    # --- a unit's own subgraph -------------------------------------------
+    if args.unit:
+        try:
+            unit = scope_of(state, args.unit)
+        except KeyError as exc:
+            print("rungraph: %s" % exc, file=sys.stderr)
+            return USAGE
+        before = unit["node"]
+        code = enter_unit(state, unit, args.node, args.force)
+        if code == OK:
+            log_event(state, "enter", unit=args.unit, **{"from": before, "to": args.node,
+                                                         "forced": bool(args.force)})
+            save(root, rid, state)
+            print("[%s] %s -> %s%s" % (args.unit, before, args.node,
+                                       "  (FORCED)" if args.force else ""))
+        return code
+
+    # --- the run's own graph ---------------------------------------------
     cur, dest = state["node"], args.node
 
     if dest not in GRAPH:
@@ -406,18 +629,36 @@ def cmd_enter(args):
                   % (dest, ", ".join(unknown)), file=sys.stderr)
             return UNDETERMINED
 
-    # Gate 2: open severe findings must not walk past judgment. `verify` is in
+    # Gate 2: the JOIN barrier. A decomposed phase does not proceed while any unit
+    # is still open - that is what makes the decomposition mean something rather
+    # than being a list in a document.
+    if dest == "join" and not args.force:
+        pending = unfinished_units(state)
+        if not state.get("units"):
+            print("rungraph: cannot join - no units were declared. Use `unit add`, or "
+                  "run the flat path (spec -> implement).", file=sys.stderr)
+            return REFUSED
+        if pending:
+            print("rungraph: cannot join - %d unit(s) still open: %s"
+                  % (len(pending), ", ".join("%s(%s)" % (u["id"], u["node"])
+                                             for u in pending)), file=sys.stderr)
+            return REFUSED
+
+    # Gate 3: open severe findings must not walk past judgment. `verify` is in
     # this list because leaving adjudication with undecided BLOCKER/MAJOR findings
     # is exactly the half-finished adjudication the node exists to prevent -
     # without it, a run reaches verification with its worst findings unread.
+    # Units are included: a phase must not verify over a unit's unread findings.
     if dest in ("verify", "commit", "promote", "effect", "done"):
         still = open_severe(state)
+        for unit in state.get("units", []):
+            still += [dict(f, id="%s/%s" % (unit["id"], f["id"])) for f in open_severe(unit)]
         if still and not args.force:
             print("rungraph: cannot enter '%s' - %d undecided BLOCKER/MAJOR finding(s): %s"
                   % (dest, len(still), ", ".join(f["id"] for f in still)), file=sys.stderr)
             return REFUSED
 
-    # Gate 3: the review must have been done by a different engine family.
+    # Gate 4: the review must have been done by a different engine family.
     if dest == "adjudicate" and not args.force:
         impl, rev = state["roles"].get("implementer"), state["roles"].get("reviewer")
         if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
@@ -425,38 +666,11 @@ def cmd_enter(args):
                   "same-family review." % impl["family"], file=sys.stderr)
             return REFUSED
 
-    # Gate 4: the adjudication loop. Bounded AND required to converge.
+    # Gate 5: the adjudication loop. Bounded AND required to converge.
     if cur == "adjudicate" and dest in ("implement", "spec"):
-        rounds = len(state["rounds"])
-        if rounds >= state["max_rounds"] and not args.force:
-            print("rungraph: adjudication round limit reached (%d). Escalate to a human "
-                  "instead of looping; `enter escalated`." % state["max_rounds"],
-                  file=sys.stderr)
-            return REFUSED
-        # Convergence is about WHICH defects are still open, not how many.
-        # Counting cannot distinguish "fixed two, introduced one" from "the same
-        # BLOCKER is back for the third time" - both read as progress.
-        stuck = stuck_defects(state)
-        if stuck and not args.force:
-            worst = stuck[0]
-            print("rungraph: defect %s has survived %d rounds (%s). The implementer is not "
-                  "fixing it; another pass is not the answer. Change the spec or "
-                  "`enter escalated`."
-                  % (worst["defect_id"], worst["rounds"], worst["summary"][:60]),
-                  file=sys.stderr)
-            return REFUSED
-        if len(state["rounds"]) >= 2:
-            prev = set(state["rounds"][-2].get("severe_defects") or [])
-            last = set(state["rounds"][-1].get("severe_defects") or [])
-            resolved = prev - last
-            if prev and not resolved and not args.force:
-                print("rungraph: not converging - every BLOCKER/MAJOR open in round %d is "
-                      "STILL open in round %d (%s). Nothing was resolved, so another pass "
-                      "is unlikely to help; change the spec or escalate."
-                      % (len(state["rounds"]) - 1, len(state["rounds"]),
-                         ", ".join(sorted(last & prev)[:4])),
-                      file=sys.stderr)
-                return REFUSED
+        code = adjudication_guard(state, "", args.force)
+        if code != OK:
+            return code
 
     state["node"] = dest
     state["path"].append(dest)
@@ -501,6 +715,21 @@ def cmd_show(args):
         for name, chk in state["checks"].items():
             mark = {"ok": "ok ", "not-ok": "NOT", "undetermined": "?? "}[chk["verdict"]]
             print("  [%s] %-24s %s" % (mark, name, chk["evidence"][:60]))
+    if state.get("units"):
+        pending = unfinished_units(state)
+        print("units: %d, %d still open" % (len(state["units"]), len(pending)))
+        for unit in state["units"]:
+            blocked = unblocked(state, unit)
+            severe = len(open_severe(unit))
+            notes = []
+            if blocked:
+                notes.append("blocked by " + ", ".join(blocked))
+            if unit["rounds"]:
+                notes.append("%d round(s)" % len(unit["rounds"]))
+            if severe:
+                notes.append("%d open BLOCKER/MAJOR" % severe)
+            print("  %-14s %-11s %-24s %s" % (unit["id"], unit["node"],
+                                              unit["title"][:24], "; ".join(notes)))
     if state["rounds"]:
         print("rounds: %d/%d" % (len(state["rounds"]), state["max_rounds"]))
         for rnd in state["rounds"]:
@@ -566,23 +795,37 @@ def build_parser():
     q.add_argument("--evidence")
     q.set_defaults(fn=cmd_check)
 
+    q = sub.add_parser("unit", help="declare a unit of work, or list them")
+    q.add_argument("action", choices=["add", "list"])
+    q.add_argument("--id")
+    q.add_argument("--title", default="")
+    q.add_argument("--depends-on", dest="depends_on",
+                   help="comma-separated ids that must finish first")
+    q.add_argument("--max-rounds", type=int)
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(fn=cmd_unit)
+
     q = sub.add_parser("findings", help="ingest a review round's findings JSON")
     q.add_argument("--file", required=True)
+    q.add_argument("--unit", help="scope this round to a unit of work")
     q.set_defaults(fn=cmd_findings)
 
     q = sub.add_parser("adjudicate", help="decide one finding")
     q.add_argument("--finding", required=True)
     q.add_argument("--decision", required=True, choices=list(DECISIONS))
     q.add_argument("--rationale")
+    q.add_argument("--unit", help="scope this decision to a unit of work")
     q.set_defaults(fn=cmd_adjudicate)
 
     q = sub.add_parser("enter", help="move to a node (guarded)")
     q.add_argument("node")
+    q.add_argument("--unit", help="move a UNIT through its own subgraph instead of the run")
     q.add_argument("--force", action="store_true", help="override a guard, recorded in the ledger")
     q.set_defaults(fn=cmd_enter)
 
     q = sub.add_parser("gate", help="ask whether a move would be allowed, without moving")
     q.add_argument("node")
+    q.add_argument("--unit")
     q.set_defaults(fn=cmd_gate)
 
     q = sub.add_parser("show", help="what a resumed orchestrator reads first")
