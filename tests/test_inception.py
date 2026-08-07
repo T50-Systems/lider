@@ -300,3 +300,57 @@ class TestWhatTheCrossFamilyReviewCaught:
         led("enter", "plan")
         out = led("gate", "implement", "--unit", "auth").stdout
         assert "[auth] pending -> implement" in out
+
+
+class TestOnePolicyNotTwo:
+    """The unit path and the run path must enforce the SAME implement prerequisites.
+
+    They used to be two copies, and they drifted: a cross-family review found the
+    unit copy silently missing the check gate, so in the decomposed path - THE path
+    for a multi-unit phase - a failing preflight did not stop a unit from starting.
+
+    These tests are the guard against that recurring. If someone adds a
+    prerequisite to one path only, the pair below stops agreeing.
+    """
+
+    @staticmethod
+    def _both(led):
+        """(run verdict, unit verdict) for `enter implement` under identical state."""
+        run_code = led("gate", "implement").returncode
+        unit_code = led("gate", "implement", "--unit", "auth").returncode
+        return run_code, unit_code
+
+    def test_a_failing_check_blocks_both_paths_identically(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        led("check", "--name", "lock", "--verdict", "not-ok", "--evidence", "held")
+        assert self._both(led) == (REFUSED, REFUSED)
+
+    def test_an_undetermined_check_blocks_both_paths_identically(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        led("check", "--name", "lock", "--verdict", "undetermined")
+        assert self._both(led) == (UNDETERMINED, UNDETERMINED)
+
+    def test_an_open_question_blocks_both_paths_identically(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        led("question", "add", "--text", "which provider?")
+        assert self._both(led) == (UNDETERMINED, UNDETERMINED)
+
+    def test_spec_drift_blocks_both_paths_identically(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        led.spec.write_text(SPEC + "\nchanged\n", encoding="utf-8")
+        assert self._both(led) == (REFUSED, REFUSED)
+
+    def test_an_unreadable_spec_blocks_both_paths_identically(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        led.spec.unlink()
+        assert self._both(led) == (UNDETERMINED, UNDETERMINED)
+
+    def test_a_clean_state_allows_both_paths(self, led):
+        led("enter", "spec")
+        led("unit", "add", "--id", "auth")
+        assert self._both(led) == (OK, OK)

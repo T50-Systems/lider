@@ -104,7 +104,6 @@ FAMILIES = {
     "calvoproxy": "openrouter",
 }
 
-SEVERE = ("BLOCKER", "MAJOR")
 DECISIONS = ("accept", "fix", "return", "respec", "reject", "escalate")
 VERDICTS = ("ok", "not-ok", "undetermined")
 
@@ -184,6 +183,12 @@ def log_event(state, kind, **fields):
     state["events"].append(fields)
 
 
+def commit(root, rid, state, kind, **fields):
+    """Record the event and persist, in that order. Every mutating command ends here."""
+    log_event(state, kind, **fields)
+    save(root, rid, state)
+
+
 # --- scopes ----------------------------------------------------------------
 # A unit carries the same shape as the run itself - findings, rounds,
 # max_rounds - so every convergence rule below works on either without knowing
@@ -197,11 +202,16 @@ def new_unit(unit_id, title, depends_on, max_rounds):
     }
 
 
+def find_by_id(items, item_id):
+    return next((x for x in items or [] if x["id"] == item_id), None)
+
+
+def csv_ids(raw):
+    return [x.strip() for x in (raw or "").split(",") if x.strip()]
+
+
 def find_unit(state, unit_id):
-    for unit in state.get("units", []):
-        if unit["id"] == unit_id:
-            return unit
-    return None
+    return find_by_id(state.get("units"), unit_id)
 
 
 def scope_of(state, unit_id):
@@ -278,7 +288,7 @@ def open_findings(state):
 
 
 def open_severe(state):
-    return [f for f in open_findings(state) if f.get("severity") in SEVERE]
+    return [f for f in open_findings(state) if f.get("severity") in fx.SEVERE]
 
 
 def stuck_defects(state, limit=3):
@@ -368,7 +378,7 @@ def cmd_unit(args):
     if existing and not args.force:
         print("rungraph: unit '%s' already exists" % args.id, file=sys.stderr)
         return REFUSED
-    depends = [d.strip() for d in (args.depends_on or "").split(",") if d.strip()]
+    depends = csv_ids(args.depends_on)
     unknown = [d for d in depends if not find_unit(state, d)]
     if unknown and not args.force:
         # Declaring a dependency on something that does not exist would make the
@@ -380,7 +390,7 @@ def cmd_unit(args):
         print("rungraph: unit '%s' cannot depend on itself" % args.id, file=sys.stderr)
         return REFUSED
 
-    covers = [c.strip() for c in (args.covers or "").split(",") if c.strip()]
+    covers = csv_ids(args.covers)
     unknown_covers = [c for c in covers if not find_criterion(state, c)]
     if unknown_covers and not args.force:
         print("rungraph: unit '%s' claims undeclared criteri(a): %s. Declare them with "
@@ -409,9 +419,7 @@ def cmd_unit(args):
         unit = new_unit(args.id, args.title, depends, args.max_rounds or state["max_rounds"])
         unit["covers"] = covers
         state.setdefault("units", []).append(unit)
-    log_event(state, "unit", unit=args.id, depends_on=depends, covers=covers,
-              replaced=bool(existing))
-    save(root, rid, state)
+    commit(root, rid, state, "unit", unit=args.id, depends_on=depends, covers=covers, replaced=bool(existing))
     print("unit '%s' %s%s%s" % (args.id, "replaced" if existing else "declared",
                                 (" (after %s)" % ", ".join(depends)) if depends else "",
                                 (" covering %s" % ", ".join(covers)) if covers else ""))
@@ -419,10 +427,7 @@ def cmd_unit(args):
 
 
 def find_criterion(state, cid):
-    for crit in state.get("criteria", []):
-        if crit["id"] == cid:
-            return crit
-    return None
+    return find_by_id(state.get("criteria"), cid)
 
 
 def cmd_criterion(args):
@@ -457,8 +462,7 @@ def cmd_criterion(args):
         state.setdefault("criteria", []).append({
             "id": args.id, "text": args.text, "status": "required",
             "reason": None, "at": int(time.time())})
-        log_event(state, "criterion", criterion=args.id)
-        save(root, rid, state)
+        commit(root, rid, state, "criterion", criterion=args.id)
         print("criterion '%s' declared (required)" % args.id)
         return OK
 
@@ -474,8 +478,7 @@ def cmd_criterion(args):
         return REFUSED
     crit["status"] = "deferred"
     crit["reason"] = args.reason
-    log_event(state, "criterion", criterion=args.id, deferred=True)
-    save(root, rid, state)
+    commit(root, rid, state, "criterion", criterion=args.id, deferred=True)
     print("criterion '%s' deferred: %s" % (args.id, args.reason))
     return OK
 
@@ -500,8 +503,7 @@ def cmd_question(args):
         state["questions"].append({"id": qid, "text": args.text, "status": "open",
                                    "answer": None, "unit": args.unit,
                                    "at": int(time.time())})
-        log_event(state, "question", question=qid)
-        save(root, rid, state)
+        commit(root, rid, state, "question", question=qid)
         print("question %s recorded (open)" % qid)
         return OK
 
@@ -517,8 +519,7 @@ def cmd_question(args):
         return REFUSED
     q["status"] = args.status
     q["answer"] = args.answer
-    log_event(state, "question", question=q["id"], status=args.status)
-    save(root, rid, state)
+    commit(root, rid, state, "question", question=q["id"], status=args.status)
     print("%s -> %s" % (q["id"], args.status))
     return OK
 
@@ -546,8 +547,7 @@ def cmd_spec(args):
         "text": text,
         "at": int(time.time()),
     }
-    log_event(state, "spec", sha256=state["spec"]["sha256"][:12])
-    save(root, rid, state)
+    commit(root, rid, state, "spec", sha256=state["spec"]["sha256"][:12])
     print("spec pinned (%s, %d bytes)" % (state["spec"]["sha256"][:12], state["spec"]["bytes"]))
     return OK
 
@@ -579,8 +579,7 @@ def cmd_assign(args):
         "engine": args.engine, "model": args.model, "family": fam,
         "at": int(time.time()), "forced": bool(args.force),
     }
-    log_event(state, "assign", role=args.role, engine=args.engine, family=fam)
-    save(root, rid, state)
+    commit(root, rid, state, "assign", role=args.role, engine=args.engine, family=fam)
     print("%s = %s (%s%s)" % (args.role, args.engine, fam or "unknown family",
                               ", forced" if args.force else ""))
     return OK
@@ -592,8 +591,7 @@ def cmd_check(args):
         "verdict": args.verdict, "evidence": args.evidence or "",
         "at": int(time.time()), "node": state["node"],
     }
-    log_event(state, "check", name=args.name, verdict=args.verdict)
-    save(root, rid, state)
+    commit(root, rid, state, "check", name=args.name, verdict=args.verdict)
     print("%s: %s" % (args.name, args.verdict))
     # The caller's own control flow gets the same three outcomes as the ledger.
     return {"ok": OK, "not-ok": REFUSED, "undetermined": UNDETERMINED}[args.verdict]
@@ -602,11 +600,9 @@ def cmd_check(args):
 def cmd_findings(args):
     """Ingest a review round's findings JSON (the pair-review contract)."""
     root, (rid, state) = args.dir, need(args.dir, args.run)
-    try:
-        scope = scope_of(state, args.unit)
-    except KeyError as exc:
-        print("rungraph: %s" % exc, file=sys.stderr)
-        return USAGE
+    # A bad --unit raises KeyError; main() already turns that into the same
+    # "rungraph: <message>" + USAGE that a local handler produced.
+    scope = scope_of(state, args.unit)
     with open(args.file, encoding="utf-8") as fh:
         doc = json.load(fh)
     items = doc.get("findings", []) if isinstance(doc, dict) else doc
@@ -642,19 +638,17 @@ def cmd_findings(args):
         scope["findings"].append(entry)
         added += 1
     fresh = [f for f in scope["findings"] if f["round"] == round_no]
-    severe = len([f for f in fresh if f["severity"] in SEVERE])
+    severe = len([f for f in fresh if f["severity"] in fx.SEVERE])
     scope["rounds"].append({
         "round": round_no, "at": int(time.time()),
         "ingested": added, "severe": severe, "recurring": recurring,
         # The identities, not just the count: this is what convergence reads.
         "severe_defects": sorted({f["defect_id"] for f in fresh
-                                  if f["severity"] in SEVERE}),
+                                  if f["severity"] in fx.SEVERE}),
         "verdict": doc.get("verdict") if isinstance(doc, dict) else None,
         "engine": doc.get("engine") if isinstance(doc, dict) else None,
     })
-    log_event(state, "findings", round=round_no, count=added, severe=severe,
-              recurring=recurring, unit=args.unit)
-    save(root, rid, state)
+    commit(root, rid, state, "findings", round=round_no, count=added, severe=severe, recurring=recurring, unit=args.unit)
     print("%sround %d: %d findings (%d BLOCKER/MAJOR, %d recurring)"
           % (("[%s] " % args.unit) if args.unit else "", round_no, added, severe, recurring))
     return OK
@@ -662,11 +656,9 @@ def cmd_findings(args):
 
 def cmd_adjudicate(args):
     root, (rid, state) = args.dir, need(args.dir, args.run)
-    try:
-        scope = scope_of(state, args.unit)
-    except KeyError as exc:
-        print("rungraph: %s" % exc, file=sys.stderr)
-        return USAGE
+    # A bad --unit raises KeyError; main() already turns that into the same
+    # "rungraph: <message>" + USAGE that a local handler produced.
+    scope = scope_of(state, args.unit)
     target = next((f for f in scope["findings"] if f["id"] == args.finding), None)
     if target is None:
         print("rungraph: no finding '%s'" % args.finding, file=sys.stderr)
@@ -674,9 +666,7 @@ def cmd_adjudicate(args):
     target["decision"] = args.decision
     target["rationale"] = args.rationale or ""
     target["decided_at"] = int(time.time())
-    log_event(state, "adjudicate", finding=args.finding, decision=args.decision,
-              unit=args.unit)
-    save(root, rid, state)
+    commit(root, rid, state, "adjudicate", finding=args.finding, decision=args.decision, unit=args.unit)
     print("%s -> %s" % (args.finding, args.decision))
     return OK
 
@@ -711,58 +701,86 @@ def adjudication_guard(scope, label, force):  # -> (code, message)
     return OK, None
 
 
+def check_edge(graph, cur, dest, label="", kind="node"):
+    """Is this transition an edge at all? Shared by the run graph and the unit graph."""
+    if dest not in graph:
+        return USAGE, ("%sunknown %s '%s'. Known: %s"
+                       % (label, kind, dest, ", ".join(sorted(graph))))
+    if dest not in graph[cur]:
+        return REFUSED, ("%s'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
+                         % (label, cur, dest, cur, ", ".join(graph[cur]) or "(nowhere - terminal)"))
+    return OK, None
+
+
+def check_implement_prereqs(state, force, label="", unit_id=None):
+    """Everything that must hold before ANY implementer starts.
+
+    This lived in two copies - one in evaluate_unit, one in evaluate_run - and
+    they drifted: a cross-family review found the unit copy silently missing the
+    check gate, so in the decomposed path (which is THE path for a multi-unit
+    phase) a failing preflight did not stop a unit from starting. Duplicated
+    policy is not a line-count problem, it is a correctness one. One copy now.
+    """
+    if force:
+        return OK, None
+
+    bad, unknown = blocking_checks(state)
+    if bad:
+        return REFUSED, "%scannot start - failing check(s): %s" % (label, ", ".join(bad))
+    if unknown:
+        return UNDETERMINED, ("%scannot start - check(s) UNDETERMINED: %s. This is not a pass."
+                              % (label, ", ".join(unknown)))
+
+    pending = open_questions(state, unit_id)
+    if pending:
+        return UNDETERMINED, (
+            "%s%d open question(s): %s. An unanswered input is an UNESTABLISHED one - answer "
+            "it, or record the assumption with `question resolve --status assumed --answer ...`."
+            % (label, len(pending), ", ".join(q["id"] for q in pending)))
+
+    drift, detail = spec_drift(state)
+    if drift == "unpinned":
+        return UNDETERMINED, ("%sno spec is pinned, so there is nothing to verify the work "
+                              "against. Pin it with `spec --file`." % label)
+    if drift == "unreadable":
+        return UNDETERMINED, ("%scannot read the pinned spec (%s). This is not a pass - re-pin "
+                              "it with `spec --file`." % (label, detail))
+    if drift == "changed":
+        return REFUSED, ("%sthe spec changed since it was pinned (%s). The implementer would be "
+                         "building from something the ledger never recorded a decision about. "
+                         "Re-pin with `spec --file`, or --force." % (label, detail))
+    return OK, None
+
+
+def check_same_family(impl, rev, label=""):
+    """A reviewer from the implementer's own family shares its blind spots."""
+    if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
+        return REFUSED, ("%simplementer and reviewer are both %s - adjudicating a same-family "
+                         "review." % (label, impl["family"]))
+    return OK, None
+
+
 def evaluate_unit(state, unit, dest, force):
     """Would this unit transition be allowed? Returns (code, message). Mutates NOTHING."""
     cur = unit["node"]
     label = "[%s] " % unit["id"]
 
-    if dest not in UNIT_GRAPH:
-        return USAGE, ("%sunknown unit node '%s'. Known: %s"
-                       % (label, dest, ", ".join(sorted(UNIT_GRAPH))))
-    if dest not in UNIT_GRAPH[cur]:
-        return REFUSED, ("%s'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
-                         % (label, cur, dest, cur,
-                            ", ".join(UNIT_GRAPH[cur]) or "(nowhere - terminal)"))
+    code, message = check_edge(UNIT_GRAPH, cur, dest, label, "unit node")
+    if code != OK:
+        return code, message
 
-    if dest == "implement" and not force:
-        # The run's checks gate a unit too. They did not: evaluate_run applied
-        # GATED and evaluate_unit never did, so in the decomposed path - which is
-        # THE path for a multi-unit phase - a failing preflight did not stop a
-        # unit from starting. Caught by the cross-family reviewer.
-        bad, unknown = blocking_checks(state)
-        if bad:
-            return REFUSED, ("%scannot start - failing check(s): %s"
-                             % (label, ", ".join(bad)))
-        if unknown:
-            return UNDETERMINED, ("%scannot start - check(s) UNDETERMINED: %s. This is not "
-                                  "a pass." % (label, ", ".join(unknown)))
-        # A unit may not start before what it depends on has finished. Otherwise
-        # the dependency is a comment and the work lands in an order nobody chose.
-        if cur == "pending":
+    if dest == "implement":
+        code, message = check_implement_prereqs(state, force, label, unit["id"])
+        if code != OK:
+            return code, message
+        # Unit-only: a unit may not start before what it depends on has finished.
+        # Otherwise the dependency is a comment and the work lands in an order
+        # nobody chose.
+        if cur == "pending" and not force:
             blocked = unblocked(state, unit)
             if blocked:
                 return REFUSED, ("%scannot start - depends on unfinished unit(s): %s"
                                  % (label, ", ".join(blocked)))
-        pending = open_questions(state, unit["id"])
-        if pending:
-            return UNDETERMINED, (
-                "%s%d open question(s): %s. An unanswered input is an UNESTABLISHED "
-                "one - answer it, or record the assumption with `question resolve "
-                "--status assumed --answer ...`."
-                % (label, len(pending), ", ".join(q["id"] for q in pending)))
-        drift, detail = spec_drift(state)
-        if drift == "unpinned":
-            # Caught by the cross-family reviewer: this fell through to OK, so an
-            # unpinned spec passed the very guard meant to establish it. "Not
-            # established" rounded down to "fine" - in the code enforcing the rule.
-            return UNDETERMINED, ("%sno spec is pinned, so there is nothing to verify the "
-                                  "work against. Pin it with `spec --file`." % label)
-        if drift == "unreadable":
-            return UNDETERMINED, ("%scannot read the pinned spec (%s). This is not a "
-                                  "pass - re-pin it with `spec --file`." % (label, detail))
-        if drift == "changed":
-            return REFUSED, ("%sthe spec changed since it was pinned (%s). Re-pin it "
-                             "with `spec --file`, or --force." % (label, detail))
 
     if dest == "done" and not force:
         still = open_severe(unit)
@@ -771,16 +789,14 @@ def evaluate_unit(state, unit, dest, force):
                              % (label, len(still), ", ".join(f["id"] for f in still)))
 
     if dest == "adjudicate" and not force:
-        impl = unit["roles"].get("implementer") or state["roles"].get("implementer")
-        rev = unit["roles"].get("reviewer") or state["roles"].get("reviewer")
-        if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
-            return REFUSED, ("%simplementer and reviewer are both %s - adjudicating a "
-                             "same-family review." % (label, impl["family"]))
+        # A unit may name its own pair; otherwise the run's stands.
+        return check_same_family(unit["roles"].get("implementer")
+                                 or state["roles"].get("implementer"),
+                                 unit["roles"].get("reviewer")
+                                 or state["roles"].get("reviewer"), label)
 
     if cur == "adjudicate" and dest == "implement":
-        code, message = adjudication_guard(unit, label, force)
-        if code != OK:
-            return code, message
+        return adjudication_guard(unit, label, force)
     return OK, None
 
 
@@ -788,11 +804,9 @@ def evaluate_run(state, dest, force):
     """Would this run transition be allowed? Returns (code, message). Mutates NOTHING."""
     cur = state["node"]
 
-    if dest not in GRAPH:
-        return USAGE, ("unknown node '%s'. Known: %s" % (dest, ", ".join(sorted(GRAPH))))
-    if dest not in GRAPH[cur]:
-        return REFUSED, ("'%s' -> '%s' is not an edge. From '%s' you may go to: %s"
-                         % (cur, dest, cur, ", ".join(GRAPH[cur]) or "(nowhere - terminal)"))
+    code, message = check_edge(GRAPH, cur, dest, "", "node")
+    if code != OK:
+        return code, message
 
     if dest in GATED and not force:
         bad, unknown = blocking_checks(state)
@@ -804,24 +818,10 @@ def evaluate_run(state, dest, force):
                                   "not a pass. Establish them or say why you could not."
                                   % (dest, ", ".join(unknown)))
 
-    if dest == "implement" and not force:
-        pending = open_questions(state)
-        if pending:
-            return UNDETERMINED, (
-                "%d open question(s): %s. An unanswered input is an UNESTABLISHED one - "
-                "answer it, or record the assumption with `question resolve --status "
-                "assumed --answer ...`." % (len(pending), ", ".join(q["id"] for q in pending)))
-        drift, detail = spec_drift(state)
-        if drift == "unpinned":
-            return UNDETERMINED, ("no spec is pinned, so there is nothing to verify the work "
-                                  "against. Pin it with `spec --file`.")
-        if drift == "unreadable":
-            return UNDETERMINED, ("cannot read the pinned spec (%s). This is not a pass - "
-                                  "re-pin it with `spec --file`." % detail)
-        if drift == "changed":
-            return REFUSED, ("the spec changed since it was pinned (%s). The implementer "
-                             "would be building from something the ledger never recorded a "
-                             "decision about. Re-pin with `spec --file`, or --force." % detail)
+    if dest == "implement":
+        code, message = check_implement_prereqs(state, force)
+        if code != OK:
+            return code, message
 
     if dest == "plan" and not force:
         # Coverage. Bookkeeping only - see uncovered_criteria() - and the refusal
@@ -845,6 +845,7 @@ def evaluate_run(state, dest, force):
                                                         for u in pending)))
 
     if dest in ("verify", "commit", "promote", "effect", "done") and not force:
+        # Run-only: a unit's undecided findings must block the phase too.
         still = open_severe(state)
         for unit in state.get("units", []):
             still += [dict(f, id="%s/%s" % (unit["id"], f["id"])) for f in open_severe(unit)]
@@ -853,10 +854,8 @@ def evaluate_run(state, dest, force):
                              % (dest, len(still), ", ".join(f["id"] for f in still)))
 
     if dest == "adjudicate" and not force:
-        impl, rev = state["roles"].get("implementer"), state["roles"].get("reviewer")
-        if impl and rev and impl.get("family") and impl["family"] == rev.get("family"):
-            return REFUSED, ("implementer and reviewer are both %s - adjudicating a "
-                             "same-family review." % impl["family"])
+        return check_same_family(state["roles"].get("implementer"),
+                                 state["roles"].get("reviewer"))
 
     if cur == "adjudicate" and dest in ("implement", "spec"):
         return adjudication_guard(state, "", force)
@@ -882,24 +881,17 @@ def cmd_enter(args):
         print("rungraph: %s" % message, file=sys.stderr)
         return code
 
-    if args.unit:
-        unit = scope_of(state, args.unit)
-        before = unit["node"]
-        unit["node"] = args.node
-        unit.setdefault("path", []).append(args.node)
-        log_event(state, "enter", unit=args.unit,
-                  **{"from": before, "to": args.node, "forced": bool(args.force)})
-        save(root, rid, state)
-        print("[%s] %s -> %s%s" % (args.unit, before, args.node,
-                                   "  (FORCED)" if args.force else ""))
-        return OK
-
-    before = state["node"]
-    state["node"] = args.node
-    state["path"].append(args.node)
-    log_event(state, "enter", **{"from": before, "to": args.node, "forced": bool(args.force)})
-    save(root, rid, state)
-    print("%s -> %s%s" % (before, args.node, "  (FORCED)" if args.force else ""))
+    # One mutation path. scope_of(state, None) is the run itself, so the unit and
+    # run cases differ only in what the event records and how the line reads.
+    scope = scope_of(state, args.unit)
+    before = scope["node"]
+    scope["node"] = args.node
+    scope.setdefault("path", []).append(args.node)
+    extra = {"unit": args.unit} if args.unit else {}
+    commit(root, rid, state, "enter",
+           **dict(extra, **{"from": before, "to": args.node, "forced": bool(args.force)}))
+    print("%s%s -> %s%s" % (("[%s] " % args.unit) if args.unit else "", before, args.node,
+                            "  (FORCED)" if args.force else ""))
     return OK
 
 
