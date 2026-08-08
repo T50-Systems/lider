@@ -31,6 +31,7 @@ from lider.runtime import Supervisor, tunable   # noqa: E402
 from lider.validate import validate_file        # noqa: E402
 from lider import log                           # noqa: E402
 from lider import metrics                       # noqa: E402
+from lider import state                         # noqa: E402
 
 DEFAULT_SCHEMA = os.path.join(HERE, "..", "schemas", "findings.schema.json")
 
@@ -64,7 +65,19 @@ def parse_args(argv):
     except ValueError:
         print("agent-exec: invalid timeout %r" % timeout_s, file=sys.stderr)
         sys.exit(2)
-    return engine, model, timeout_s, out_json, log_file, prompt
+    
+    # Load and validate state
+    current_state = state.read_state()
+    expected_gen = current_state.get("generation_id", 1) if current_state else 1
+    
+    # Validate generation before starting
+    if current_state is not None:
+        valid, msg = state.validate_generation(current_state, expected_gen)
+        if not valid:
+            print("agent-exec: %s" % msg, file=sys.stderr)
+            sys.exit(2)
+    
+    return engine, model, timeout_s, out_json, log_file, prompt, current_state
 
 
 def tail_filtered(log_file, lines=5):
@@ -79,7 +92,7 @@ def tail_filtered(log_file, lines=5):
 
 
 def main():
-    engine, model, timeout_s, out_json, log_file, prompt = parse_args(sys.argv[1:])
+    engine, model, timeout_s, out_json, log_file, prompt, current_state = parse_args(sys.argv[1:])
     schema = os.path.abspath(os.environ.get("LIDER_SCHEMA") or DEFAULT_SCHEMA)
     status_file = log_file + ".status.json"
 
@@ -182,6 +195,15 @@ def main():
 
     with open(log_file, "a", encoding="utf-8") as fh:
         fh.write("agent-exec.py[%s]: ok (%s valid).\n" % (adapter.id, out_json))
+    # Update state on success
+    if current_state is not None:
+        new_state = state.increment_generation(current_state)
+        new_state["phase"] = "review"
+        state.update_metadata(new_state,
+            engine_used=adapter.id,
+            cost_usd=usage.get("cost_usd"),
+            tokens_used=usage.get("input_tokens") + usage.get("output_tokens") if usage.get("input_tokens") and usage.get("output_tokens") else None)
+        state.write_state_atomic(new_state)
     return 0
 
 
