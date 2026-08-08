@@ -30,6 +30,19 @@ class CodexAdapter(Adapter):
                         break
         return bool(self.bin)
 
+    def _real_codex_home(self):
+        """Locate the user's real ~/.codex directory."""
+        if os.environ.get("CODEX_HOME"):
+            return os.environ["CODEX_HOME"]
+        # Windows uses USERPROFILE, Unix uses HOME
+        for var in ("HOME", "USERPROFILE"):
+            val = os.environ.get(var)
+            if val:
+                candidate = os.path.join(val, ".codex")
+                if os.path.isdir(candidate):
+                    return candidate
+        return None
+
     def isolate(self, anchor_dir):
         """Point CODEX_HOME at a throwaway home.
 
@@ -38,9 +51,9 @@ class CodexAdapter(Adapter):
         per-turn hook failures that push real calls toward the timeout. Only
         credentials and a few scalars are carried over.
         """
-        real = os.environ.get("CODEX_HOME") or os.path.join(os.environ.get("HOME", ""), ".codex")
-        if not real or real == ".codex":
-            print("codex: neither CODEX_HOME nor HOME is set; cannot locate credentials.",
+        real = self._real_codex_home()
+        if not real:
+            print("codex: cannot locate ~/.codex (tried CODEX_HOME, HOME, USERPROFILE).",
                   file=sys.stderr)
             return
         iso = tempfile.mkdtemp(prefix=".codex-iso-", dir=anchor_dir or None)
@@ -62,10 +75,10 @@ class CodexAdapter(Adapter):
         self.iso_home, self.real_home = iso, real
 
     def preflight(self, schema):
-        real = os.environ.get("CODEX_HOME") or os.path.join(os.environ.get("HOME", ""), ".codex")
-        if not os.path.isfile(os.path.join(real, "auth.json")):
+        real = self._real_codex_home()
+        if not real or not os.path.isfile(os.path.join(real, "auth.json")):
             print("codex preflight: WARNING no auth.json under '%s' - Codex may fail to "
-                  "authenticate." % real, file=sys.stderr)
+                  "authenticate." % (real or "unknown"), file=sys.stderr)
         return 0
 
     def auth_hint(self):
