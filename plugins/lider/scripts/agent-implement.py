@@ -31,6 +31,8 @@ from lider import adapters                      # noqa: E402
 from lider.adapters import DEFAULT_ENGINE       # noqa: E402
 from lider.runtime import Supervisor, tunable   # noqa: E402
 from lider import metrics                       # noqa: E402
+from lider import state                         # noqa: E402
+from lider import log                           # noqa: E402
 
 
 def git(*args):
@@ -131,11 +133,22 @@ def main():
     prompt = " ".join(argv[4:])
     status_file = log_file + ".status.json"
 
+    # Load and validate state
+    current_state = state.read_state()
+    expected_gen = current_state.get("generation_id", 1) if current_state else 1
+
     def finish(code):
         with open(done_file, "w", encoding="utf-8") as fh:
             fh.write("%s\n" % code)
         return code
 
+    # Validate generation before starting
+    if current_state is not None:
+        valid, msg = state.validate_generation(current_state, expected_gen)
+        if not valid:
+            print("agent-implement: %s" % msg, file=sys.stderr)
+            return finish(2)
+    
     try:
         adapter = adapters.load(engine)
     except (ValueError, ImportError) as exc:
@@ -196,6 +209,15 @@ def main():
     else:
         with open(log_file, "a", encoding="utf-8") as fh:
             fh.write("agent-implement.py[%s]: ok.\n" % adapter.id)
+        # Update state on success
+        if current_state is not None:
+            new_state = state.increment_generation(current_state)
+            new_state["phase"] = "implement"
+            state.update_metadata(new_state,
+                engine_used=adapter.id,
+                cost_usd=usage.get("cost_usd"),
+                tokens_used=usage.get("input_tokens") + usage.get("output_tokens") if usage.get("input_tokens") and usage.get("output_tokens") else None)
+            state.write_state_atomic(new_state)
     return finish(rc)
 
 
